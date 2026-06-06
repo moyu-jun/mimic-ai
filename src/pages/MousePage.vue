@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
  * 鼠标模拟页 — 需求 3.3.3 / DESIGN 15.6
- * 列表：X坐标（只读）/ Y坐标（只读）/ 间隔 / 坐标拾取按钮 / 删除按钮。
- * 阶段 5 数据全部 mock 前端，坐标拾取按钮仅 console.log 占位。
+ * 表格四列：X坐标 / Y坐标 / 时间间隔 / 操作（坐标拾取 + 删除）。
+ * 表头固定（sticky），数据行滚动；阶段 5 数据全部 mock 前端，坐标拾取按钮仅 console.log 占位。
  */
 import { onMounted, onBeforeUnmount } from 'vue'
 import { appStore } from '../stores/appStore'
@@ -61,28 +61,30 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="mouse-page">
-    <div class="list-container">
+    <div class="table-scroll">
+      <div class="table-header">
+        <div class="th">X 坐标</div>
+        <div class="th">Y 坐标</div>
+        <div class="th">时间间隔</div>
+        <div class="th">操作</div>
+      </div>
+
       <div v-if="!appStore.mouseActions.length" class="empty-hint">
         暂无鼠标动作
       </div>
-      <div v-else class="list-scroll">
-        <div
-          v-for="action in appStore.mouseActions"
-          :key="action.id"
-          class="list-row"
-        >
-          <div class="coord-display">
-            <span class="coord-label">X</span>
-            <span class="coord-value">{{
-              action.x !== null ? action.x : '—'
-            }}</span>
-          </div>
-          <div class="coord-display">
-            <span class="coord-label">Y</span>
-            <span class="coord-value">{{
-              action.y !== null ? action.y : '—'
-            }}</span>
-          </div>
+      <div
+        v-for="action in appStore.mouseActions"
+        v-else
+        :key="action.id"
+        class="table-row"
+      >
+        <div class="td coord-cell">
+          {{ action.x !== null ? action.x : '—' }}
+        </div>
+        <div class="td coord-cell">
+          {{ action.y !== null ? action.y : '—' }}
+        </div>
+        <div class="td interval-cell">
           <input
             type="text"
             class="interval-input"
@@ -90,6 +92,8 @@ onBeforeUnmount(() => {
             @input="onIntervalInput(action, $event)"
           />
           <span class="unit">ms</span>
+        </div>
+        <div class="td actions-cell">
           <button
             type="button"
             class="pick-btn"
@@ -132,11 +136,78 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.list-container {
+.table-scroll {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+}
+
+/* 表头与数据行共用网格列宽，保证对齐 */
+.table-header,
+.table-row {
+  display: grid;
+  grid-template-columns: 56px 56px 100px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 0 12px;
+}
+
+.table-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 30px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.th {
+  text-align: center;
+  letter-spacing: 0.3px;
+}
+
+.th:last-child {
+  text-align: left;
+}
+
+.table-row {
+  height: 36px;
+  min-height: 36px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.table-row:last-child {
+  border-bottom: none;
+}
+
+.td {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.coord-cell {
+  text-align: center;
+  font-family: 'Consolas', 'Courier New', monospace;
+}
+
+.interval-cell {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  justify-content: center;
+}
+
+.actions-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .empty-hint {
@@ -148,50 +219,8 @@ onBeforeUnmount(() => {
   color: var(--text-disabled);
 }
 
-.list-scroll {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-}
-
-.list-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 36px;
-  min-height: 36px;
-  flex-shrink: 0;
-  padding: 0 12px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-subtle);
-  border-radius: 7px;
-}
-
-.coord-display {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.coord-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  text-transform: uppercase;
-}
-
-.coord-value {
-  width: 50px;
-  font-size: 12px;
-  color: var(--text-primary);
-  font-family: 'Consolas', 'Courier New', monospace;
-  text-align: right;
-}
-
 .interval-input {
-  width: 60px;
+  width: 56px;
   height: 24px;
   padding: 0 8px;
   background: var(--bg-elevated);
@@ -215,13 +244,14 @@ onBeforeUnmount(() => {
 
 .pick-btn {
   height: 24px;
-  padding: 0 12px;
+  padding: 0 10px;
   border-radius: 5px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-color);
   color: var(--text-primary);
   font-size: 11px;
   font-weight: 500;
+  white-space: nowrap;
   transition:
     background var(--transition-fast) var(--ease-default),
     border-color var(--transition-fast) var(--ease-default);
@@ -244,6 +274,7 @@ onBeforeUnmount(() => {
   height: 24px;
   border-radius: 5px;
   color: var(--text-secondary);
+  flex-shrink: 0;
   transition:
     background var(--transition-fast) var(--ease-default),
     color var(--transition-fast) var(--ease-default);
@@ -265,13 +296,15 @@ onBeforeUnmount(() => {
 }
 
 .add-btn {
-  height: 30px;
-  padding: 0 20px;
+  height: 32px;
+  min-width: 160px;
+  padding: 0 36px;
   border-radius: 6px;
   background: var(--accent);
   color: var(--color-paper-white);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
+  letter-spacing: 1px;
   transition: background var(--transition-fast) var(--ease-default);
 }
 
@@ -284,20 +317,20 @@ onBeforeUnmount(() => {
 }
 
 /* 滚动条样式 */
-.list-scroll::-webkit-scrollbar {
+.table-scroll::-webkit-scrollbar {
   width: 8px;
 }
 
-.list-scroll::-webkit-scrollbar-track {
+.table-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.list-scroll::-webkit-scrollbar-thumb {
+.table-scroll::-webkit-scrollbar-thumb {
   background: var(--border-color);
   border-radius: 4px;
 }
 
-.list-scroll::-webkit-scrollbar-thumb:hover {
+.table-scroll::-webkit-scrollbar-thumb:hover {
   background: var(--text-disabled);
 }
 </style>
