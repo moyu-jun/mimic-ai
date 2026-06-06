@@ -78,3 +78,46 @@
 
 - 透明圆角 + 阴影的实机效果未验证，挂在待确认事项 #6（TASKS 阶段 16）。
 - `App.vue` 是空容器，不做任何布局；标题栏 / 侧栏 / 状态栏在阶段 2 落地。
+
+---
+
+## 阶段 2：应用骨架（标题栏 + 菜单 + 状态栏 + 路由）
+
+**完成时间**：2026-06-06
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/types/config.ts](../src/types/config.ts) | 新建 | 仅放 `AppPage` 与 `RuntimeStatus`；其余类型留待阶段 4-8 补全，避免未使用告警 |
+| [src/stores/appStore.ts](../src/stores/appStore.ts) | 新建 | `reactive` store：`currentPage`(home) / `runtimeStatus`(Idle) / `isLocked`(false) + `setPage()` |
+| [src/lib/pages.ts](../src/lib/pages.ts) | 新建 | `PAGE_LABELS` 中文映射 + `MAIN_PAGES` 顺序，标题栏与侧栏共用 |
+| [src/components/AppTitleBar.vue](../src/components/AppTitleBar.vue) | 新建 | 三栏 grid（品牌 / 居中页名 / 控制按钮）；`data-tauri-drag-region` + 按钮区 `pointer-events`；最小化/关闭走 `getCurrentWindow()` |
+| [src/components/AppSidebar.vue](../src/components/AppSidebar.vue) | 新建 | 主菜单置顶 + 设置置底；激活态强调色左条 + 高亮背景 |
+| [src/components/AppStatusBar.vue](../src/components/AppStatusBar.vue) | 新建 | 圆点 + 文案，按 DESIGN 15.3-bis 的 7 状态颜色/文案映射 |
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) 等 4 个 | 新建 | 仅渲染页面名占位文字 |
+| [src/App.vue](../src/App.vue) | 重写 | 纵向布局：标题栏 + (侧栏 + `<component :is>`) + 状态栏；`PAGE_COMPONENTS` 映射路由 |
+| [src-tauri/capabilities/default.json](../src-tauri/capabilities/default.json) | 改 | 追加 `core:window:allow-minimize/-close/-start-dragging` 权限 |
+
+### 关键决策
+
+- **不引入 vue-router**：页面固定四个，用 `currentPage → 组件` 映射 + `<component :is>` 即可，符合 KISS，避免多余依赖。
+- **不引入 `@/` 路径别名**：DESIGN 示例用了 `@/`，但项目 tsconfig/vite 未配置该别名；阶段 2 不属别名配置范围，统一用相对路径，保持外科手术式修改。
+- **抽出 `src/lib/pages.ts`**：标题栏（当前页名）与侧栏（菜单标签）都要中文映射，提前共用避免重复定义（DRY）。
+- **补 capability 权限**：Tauri 2 的 `core:default` 不含 `window:allow-minimize/-close`；不补则最小化/关闭按钮运行时静默失败，直接卡阶段 2 验收，故一并加上 `allow-start-dragging`（拖拽区依赖）。
+
+### 验证结果
+
+- `npm run build`（vue-tsc + Vite）— 通过：44 模块，CSS 5.69 kB / JS 81.35 kB（gzip 29.96 kB），无 TS 错误。
+- `cargo check`（src-tauri）— 通过：4.64s，capability 权限标识符校验通过，无 warning。
+- `npm run tauri dev` — **未在沙箱内启动**（交互式长任务）；拖拽 / 最小化 / 关闭的真实行为需阶段 16 实机复核。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 2 状态「待开始」→「✅ 已完成」；四条验收清单全部勾选。
+- REQUIREMENTS / DESIGN — 无改动。
+
+### 偏差与遗留
+
+- 标题栏应用图标暂用 `/tauri.svg`（public 现有资源）；正式品牌图标待后续阶段替换。
+- 窗口拖拽 / 最小化 / 关闭按钮的实机行为未在沙箱验证，与透明圆角同挂阶段 16。
