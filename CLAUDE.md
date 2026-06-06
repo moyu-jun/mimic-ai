@@ -1,65 +1,71 @@
 # CLAUDE.md
 
-Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+## 1. 编码前先思考
 
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+**不要假设。不要隐藏困惑。明确权衡。**
 
-## 1. Think Before Coding
+在实现之前：
+- 明确陈述你的假设。如果不确定，就提问。
+- 如果存在多种解释，请列出它们 - 不要默默选择。
+- 如果存在更简单的方法，就说出来。必要时提出质疑。
+- 如果有些东西不清楚，就停下来。指出困惑之处。提问。
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
+## 2. 简单优先
 
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
+**用最少的代码解决问题。不做推测性的工作。**
 
-## 2. Simplicity First
+- 不要添加超出需求的功能。
+- 不要为仅使用一次的代码添加抽象。
+- 不要添加未被要求的"灵活性"或"可配置性"。
+- 不要为不可能发生的场景添加错误处理。
+- 如果你写了 200 行代码而实际只需 50 行，请重写。
 
-**Minimum code that solves the problem. Nothing speculative.**
+问问自己："资深工程师会说这太复杂吗？"如果是，就简化它。
 
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
+## 3. 外科手术式修改
 
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+**只修改必须修改的部分。只清理自己造成的混乱。**
 
-## 3. Surgical Changes
+编辑现有代码时：
+- 不要"改进"相邻的代码、注释或格式。
+- 不要重构没有问题的部分。
+- 遵循现有风格，即使你会采用不同的做法。
+- 如果你注意到无关的死代码，提一下 - 但不要删除它。
 
-**Touch only what you must. Clean up only your own mess.**
+当你的修改产生孤立代码时：
+- 删除因你的修改而变得未使用的导入/变量/函数。
+- 不要删除预先存在的死代码，除非被要求删除。
 
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+测试标准：每一行修改都应该直接追溯到用户的请求。
 
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
+## 4. 目标驱动执行
 
-The test: Every changed line should trace directly to the user's request.
+**定义成功标准。循环直到验证通过。**
 
-## 4. Goal-Driven Execution
+将任务转化为可验证的目标：
+- "添加验证" → "为无效输入编写测试，然后让它们通过"
+- "修复 bug" → "编写能重现它的测试，然后让它通过"
+- "重构 X" → "确保重构前后测试都通过"
 
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
+对于多步骤任务，陈述一个简短的计划：
 ```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
+1. [步骤] → 验证: [检查]
+2. [步骤] → 验证: [检查]
+3. [步骤] → 验证: [检查]
 ```
 
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+强有力的成功标准让你能够独立循环。弱标准（"让它工作"）需要持续澄清。
 
----
+## 5. 项目文档
 
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+实施任何编码任务前，必须先对照以下三份文档；三者内容冲突时**以 REQUIREMENTS 为准**，并同步更新另外两份。
+
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — 功能需求、用户行为约束、边界条件、默认配置。
+- [docs/DESIGN.md](docs/DESIGN.md) — 技术选型、模块划分、命令/事件协议、数据结构、线程模型。
+- [docs/TASKS.md](docs/TASKS.md) — 实施顺序、阶段验收标准、待确认事项跟踪。
+
+对应使用方式：
+- 接到新需求 → 先读 REQUIREMENTS 对齐意图，必要时回写。
+- 决定怎么做 → 查 DESIGN 现有约定，新增/调整设计需同步落到 DESIGN。
+- 决定先做什么 → 按 TASKS 当前阶段推进；阶段验收点是该次提交的成功标准，任务完成后需要标记进度。
+
