@@ -41,3 +41,9 @@ export interface MouseAction {
   y: number | null
   intervalMs: number
 }
+
+/** 热键配置（DESIGN 4.1） */
+export interface HotkeyConfig {
+  start: CapturedKey
+  stop: CapturedKey
+}

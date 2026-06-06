@@ -6,7 +6,7 @@
  */
 
 import { reactive } from 'vue'
-import type { AppPage, RuntimeStatus, KeyboardAction, MouseAction } from '../types/config'
+import type { AppPage, RuntimeStatus, KeyboardAction, MouseAction, HotkeyConfig } from '../types/config'
 
 export const appStore = reactive({
   /** 当前激活页面，默认首页 */
@@ -34,6 +34,11 @@ export const appStore = reactive({
       intervalMs: 20,
     },
   ] as MouseAction[],
+  /** 全局热键配置（阶段 6 mock，阶段 12 起由 update_hotkeys 真实注册） */
+  hotkeys: {
+    start: { keyLabel: 'F12', scanCode: 88 },
+    stop: { keyLabel: 'F12', scanCode: 88 },
+  } as HotkeyConfig,
 })
 
 /** 切换当前页面（后续阶段会在此处追加 set_current_page 后端调用） */

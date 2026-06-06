@@ -248,3 +248,43 @@
 | 底部「添加」按钮过窄显得局促 | 高度 30→32、`min-width: 160px`、左右 padding 20→36、字号 12→13、`letter-spacing: 1px` |
 
 `npm run build` 重跑通过：CSS 14.51 kB / JS 90.39 kB（gzip 32.81 kB）。
+
+---
+
+## 阶段 6：设置页 UI
+
+**完成时间**：2026-06-06
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/types/config.ts](../src/types/config.ts) | 改 | 新增 `HotkeyConfig` 接口（start / stop: CapturedKey） |
+| [src/stores/appStore.ts](../src/stores/appStore.ts) | 改 | 新增 `hotkeys` 字段，初值 F12/F12（scanCode 88） |
+| [src/pages/SettingsPage.vue](../src/pages/SettingsPage.vue) | 重写 | 复用 KeyCaptureInput 渲染启动/停止热键；保存按钮对比快照（mock）+ 2s 自动消失提示；`onMounted` 强制 Idle |
+
+### 关键决策
+
+- **本地副本 + 快照对比**：`startKey` / `stopKey` 用 `ref` 持本地副本，`persistedSnapshot` 单独存「已持久化」快照；保存时才把本地副本写回 `appStore.hotkeys` 并刷新快照。这样捕获过程中的中间值不会污染对比基准，`isDirty` 也能可靠地判断「与已持久化版本是否真的不同」（需求 3.5、3.3.4）。
+- **保存按钮 disabled 绑定 `isDirty`**：无变化时按钮置灰，点击也不会触发提示，与「无变化不提示」需求合一；语义比「点了再判断要不要提示」更直观。
+- **不在 `startKey === stopKey` 时拦截**：需求 3.6 明确启动/停止允许同键，由运行状态判断该启动还是停止；前端不做强校验。
+- **保存提示用 setTimeout 自动消失**：2s 后清空 `saveMessage`，避免长期占据底部空间；离开页面时 `onBeforeUnmount` 清理 timer 防泄漏。
+- **不引入 `cloneDeep` 第三方库**：`CapturedKey` / `HotkeyConfig` 都是浅层数据，本地写两个 6-8 行的 `cloneKey` / `cloneHotkeys` 比拉一个依赖更合规（KISS / YAGNI）。
+- **`runtimeStatus` 强制置 Idle**：设置页不是可触发模拟页（任务 4），即使从按键/鼠标页切过来也要回到 Idle，避免热键误触发。
+- **页面布局**：标题+描述（顶部）+ 表单卡片（中部，flex:1）+ 保存条（底部）；表单两行 `label` 与 `KeyCaptureInput` 用 `space-between` 拉开，与 `KeyCaptureInput` 已有的 140px 宽度配合刚好。
+
+### 验证结果
+
+- `npm run build`（vue-tsc + Vite）— 通过：48 模块，CSS 16.04 kB / JS 92.14 kB（gzip 33.31 kB），无 TS 错误。
+- 四条验收清单（捕获回显 / 失焦回显原值 / 有变化提示无变化静默 / 同键可设置）通过静态分析与代码审查。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 6 状态「待开始」→「✅ 已完成」；四条验收全部勾选。
+- REQUIREMENTS / DESIGN — 无改动。
+
+### 偏差与遗留
+
+- 保存为 mock 行为：仅写 store + 显示固定文本「已保存（mock）」，未调用后端 `update_hotkeys`、未写盘、未真实注册全局热键（阶段 12 接入）。
+- 未做「热键与按键模拟列表 scanCode 冲突校验」（DESIGN 15.6 反馈 Q6），该校验放在后端 `update_hotkeys` 实现，前端只需展示后端返回的错误（阶段 12）。
+- 实机捕获体验（焦点闪烁、F12 输入框冲突）未在沙箱验证，随阶段 16 实机复核。
