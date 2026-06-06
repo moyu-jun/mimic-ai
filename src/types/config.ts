@@ -18,3 +18,18 @@ export type RuntimeStatus =
   | 'RunningMouse'
   | 'PickingMouse'
   | 'Error'
+
+/** 按键捕获结果（DESIGN 8.1） */
+export interface CapturedKey {
+  keyLabel: string
+  scanCode: number
+}
+
+/** 按键模拟单项动作（DESIGN 4.1） */
+export interface KeyboardAction {
+  id: string
+  selected: boolean
+  keyLabel: string
+  scanCode: number
+  intervalMs: number
+}

@@ -6,7 +6,7 @@
  */
 
 import { reactive } from 'vue'
-import type { AppPage, RuntimeStatus } from '../types/config'
+import type { AppPage, RuntimeStatus, KeyboardAction } from '../types/config'
 
 export const appStore = reactive({
   /** 当前激活页面，默认首页 */
@@ -15,6 +15,16 @@ export const appStore = reactive({
   runtimeStatus: 'Idle' as RuntimeStatus,
   /** 运行期锁定蒙版开关（阶段 7 接入） */
   isLocked: false,
+  /** 按键动作列表（阶段 4 mock，阶段 8 起由 load_config 提供） */
+  keyboardActions: [
+    {
+      id: 'mock-kb-1',
+      selected: true,
+      keyLabel: 'F',
+      scanCode: 33,
+      intervalMs: 20,
+    },
+  ] as KeyboardAction[],
 })
 
 /** 切换当前页面（后续阶段会在此处追加 set_current_page 后端调用） */

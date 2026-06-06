@@ -155,3 +155,43 @@
 
 - 驱动卡片仅实现 `NotInstalled` 一种视觉，其余三态（Ready / InstalledNeedReboot / Error）的样式分支留待阶段 11。
 - 文案与配色的实机观感（600x400 紧凑度）未在沙箱验证，随阶段 16 实机复核。
+
+---
+
+## 阶段 4：按键模拟页 UI（含按键捕获组件）
+
+**完成时间**：2026-06-06
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/types/config.ts](../src/types/config.ts) | 改 | 新增 `CapturedKey` / `KeyboardAction` 接口 |
+| [src/stores/appStore.ts](../src/stores/appStore.ts) | 改 | 新增 `keyboardActions` 字段，初值含一项 mock（F / scanCode 33 / 已勾选） |
+| [src/lib/keyMap.ts](../src/lib/keyMap.ts) | 新建 | 白名单映射表：字母/数字/F1-F12/功能键/左右Shift/Ctrl/Alt，`lookupKey(code)` 查询 |
+| [src/components/KeyCaptureInput.vue](../src/components/KeyCaptureInput.vue) | 新建 | 聚焦捕获态、keydown拦截、白名单查表回显、失焦回显原值快照 |
+| [src/pages/KeyboardPage.vue](../src/pages/KeyboardPage.vue) | 重写 | 顶部捕获框+添加按钮；列表勾选/键位/间隔/删除；`onMounted` mock 切 `ReadyKeyboard` |
+
+### 关键决策
+
+- **间隔输入用 `type="text"` + 正则过滤**：禁止步进按钮（DESIGN 15.6），`onInput` 时 `replace(/[^0-9]/g, '')`，空值回退到 `DEFAULT_INTERVAL_MS`。
+- **未勾选行用 `opacity:0.5`**：禁用删除线（需求 3.3.2），视觉差异明显且无文字穿越。
+- **`scrollbar-gutter: stable`**：预留滚动条宽度，无→有切换时列表不跳变（需求反馈 L4）。
+- **白名单外按键不提示**：`lookupKey` 返回 `null` 时继续等待下一次按键，不 `alert` 也不回显错误（需求反馈 Q7）。
+- **进入页面 mock 切状态**：`onMounted` 时 `runtimeStatus = 'ReadyKeyboard'`，`onBeforeUnmount` 回 `Idle`（阶段 12 会由后端 `set_current_page` 统一管理）。
+
+### 验证结果
+
+- `npm run build` — 通过：48 模块，CSS 11.12 kB / JS 88.12 kB（gzip 32.24 kB），无 TS 错误。
+- 六条验收清单（增删勾选改间隔、输入过滤、视觉差异、滚动条预留、白名单外按键、状态栏）通过静态分析与代码审查。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 4 状态「待开始」→「✅ 已完成」；六条验收全部勾选。
+- REQUIREMENTS / DESIGN — 无改动。
+
+### 偏差与遗留
+
+- 数据全部 mock 前端，列表增删勾选改间隔无持久化（阶段 9 接 `save_config`）。
+- 进入/离开页面切状态的逻辑在组件 `onMounted/onBeforeUnmount` 本地实现（阶段 12 会由后端 `set_current_page` 统一门控）。
+- 实机交互体验（捕获框焦点、滚动条样式、按键响应延迟）未在沙箱验证，随阶段 16 实机复核。
