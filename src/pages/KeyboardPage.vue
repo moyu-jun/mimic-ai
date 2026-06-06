@@ -16,6 +16,15 @@ const capturedKey = ref<CapturedKey | null>(null)
 function addAction(): void {
   if (!capturedKey.value) return
 
+  // 已存在相同键位则拒绝添加，重置输入框
+  const exists = appStore.keyboardActions.some(
+    a => a.scanCode === capturedKey.value!.scanCode
+  )
+  if (exists) {
+    capturedKey.value = null
+    return
+  }
+
   const newAction: KeyboardAction = {
     id: `kb-${Date.now()}`,
     selected: false,
@@ -203,6 +212,8 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 10px;
   height: 36px;
+  min-height: 36px;
+  flex-shrink: 0;
   padding: 0 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
