@@ -307,3 +307,44 @@
 | 聚焦时背景从 `--bg-elevated` 改为 `--bg-primary` | 聚焦状态进一步加深，配合边框变为强调色形成明确捕获状态视觉反馈 |
 
 `npm run build` 重跑通过：CSS 16.05 kB / JS 92.14 kB（gzip 33.31 kB）。
+
+---
+
+## 阶段 7：运行期锁定蒙版（Mock 切换）
+
+**完成时间**：2026-06-07
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/App.vue](../src/App.vue) | 改 | `.main-area` 加 `position: relative`；新增 `.lock-overlay`（`position:absolute; inset:0`、`pointer-events:auto`、`z-index:10`）由 `appStore.isLocked` 切换 `v-if`；蒙版仅覆盖菜单+内容，不覆盖标题栏/状态栏 |
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 改 | 临时增加「模拟运行（mock）/停止模拟（mock）」切换按钮，点击在 `Idle ↔ RunningKeyboard` 间同步切 `runtimeStatus + isLocked`；按钮 `position:fixed` + `z-index:50`，浮于蒙版之上确保闭环可点 |
+
+### 关键决策
+
+- **`v-if` 而非 `v-show`**：蒙版未运行时直接不渲染节点，避免空 div 占用合成层；`isLocked` 切换频次低（仅启停模拟），无重复挂载成本。
+- **蒙版使用 `color-mix(... var(--bg-primary) 65%, transparent)`**：以主题主背景为基底取 65% 透明度，实现「半透明灰」而不硬编码 `rgba()`，深色主题语义一致；亦避免色盘外的新颜色（DESIGN 15.1 / 组件不得硬编码颜色）。
+- **`.main-area` 加 `position: relative`**：锚定 `.lock-overlay` 的绝对定位坐标系，确保 `inset: 0` 仅铺满中部主区域而不溢出到 `.app-container` 的标题栏/状态栏。
+- **`cursor: not-allowed`**：蒙版生效时鼠标指针给出禁用反馈；DESIGN 15.5 未强制此细节，但按需求 3.9「禁止用户切换菜单、修改…数据」的语义补足，且不引入文字/图标，保持蒙版的「无内容」原则。
+- **`aria-hidden="true"`**：蒙版仅作视觉与点击拦截，对辅助技术不可见，避免无文本节点污染语义树。
+- **mock 按钮 `position:fixed` 浮于蒙版上**：阶段 7 的核心矛盾是「蒙版生效后用户必须能切回 Idle 才能完成验证」。采用 `position:fixed` + `z-index:50`（>蒙版 z-index:10）让按钮始终可点，避免在蒙版上开洞或在按钮上单独写 `pointer-events`，实现最简单。阶段 12 真热键接入后该按钮整体移除，蒙版退出由 `runtime_status_changed` 事件驱动。
+- **运行态用 `--danger` 提示**：「停止模拟」按钮态使用警示红，与「启动」橙色形成明确视觉区分；颜色全部走主题变量。
+- **不引入 keyboard ESC 兜底**：阶段 7 仅验证视觉，按钮可见可点足够；ESC 退出与真实热键退出在阶段 12 一并实现，YAGNI。
+
+### 验证结果
+
+- `npm run build`（vue-tsc + Vite）— 通过：48 模块，CSS 16.94 kB / JS 92.54 kB（gzip 33.43 kB），无 TS 错误。
+- 四条验收清单（蒙版仅覆盖中部 / 蒙版无文字图标 / 点击菜单与表单无响应 / 状态栏文案同步切换）通过静态分析与代码审查。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 7 状态「待开始」→「✅ 已完成」；四条验收全部勾选。
+- REQUIREMENTS / DESIGN — 无改动。
+
+### 偏差与遗留
+
+- 蒙版透明度（`bg-primary 65%`）与按钮浮层位置的实机观感（600×400 紧凑度）未在沙箱验证，随阶段 16 实机复核。
+- 「模拟运行（mock）」按钮按 TASKS 计划在阶段 12 移除；当前作为验证入口保留在首页右下角，启用时按钮变红显示「停止模拟」。
+- 蒙版进入/退出无过渡动画；阶段 16 打磨阶段如有需要再考虑 `opacity` fade（120ms）。
+

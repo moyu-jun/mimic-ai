@@ -5,7 +5,14 @@
  *   - 管理员权限：阶段 10 接 get_admin_status
  *   - 驱动状态：阶段 11 接 check_driver_status / install_driver
  *   - 热键概览：阶段 8 起由 load_config 提供
+ *
+ * 阶段 7：临时增加「模拟运行（mock）」切换按钮，用于验证锁定蒙版视觉。
+ *   - 点击在 Idle ↔ RunningKeyboard 间切换 runtimeStatus + isLocked。
+ *   - 按钮使用 position:fixed + 高 z-index，确保锁定后仍能点击切回（否则验证流程无法闭环）。
+ *   - 阶段 12 真热键接入后整体移除该按钮（但保留 App.vue 内的 lock-overlay 逻辑）。
  */
+import { computed } from 'vue'
+import { appStore } from '../stores/appStore'
 
 const APP_VERSION = '0.1.0'
 const APP_TAGLINE = 'Windows 按键与鼠标模拟工具'
@@ -18,6 +25,19 @@ const stopHotkey = 'F12'
 function onInstallDriver(): void {
   // 阶段 11 接 install_driver；当前为占位，点击无副作用。
   console.log('[mock] install driver clicked')
+}
+
+// === 阶段 7 mock：模拟运行切换 ===
+const isMockRunning = computed(() => appStore.runtimeStatus === 'RunningKeyboard')
+
+function toggleMockRun(): void {
+  if (isMockRunning.value) {
+    appStore.runtimeStatus = 'Idle'
+    appStore.isLocked = false
+  } else {
+    appStore.runtimeStatus = 'RunningKeyboard'
+    appStore.isLocked = true
+  }
 }
 </script>
 
@@ -63,6 +83,16 @@ function onInstallDriver(): void {
         停止：<b>{{ stopHotkey }}</b>
       </span>
     </div>
+
+    <!-- 阶段 7 临时按钮：mock 切换 RunningKeyboard，验证锁定蒙版（阶段 12 移除） -->
+    <button
+      type="button"
+      class="mock-run-btn"
+      :class="{ running: isMockRunning }"
+      @click="toggleMockRun"
+    >
+      {{ isMockRunning ? '停止模拟（mock）' : '模拟运行（mock）' }}
+    </button>
   </section>
 </template>
 
@@ -219,5 +249,43 @@ function onInstallDriver(): void {
 .hotkey-value .sep {
   margin: 0 6px;
   color: var(--text-disabled);
+}
+
+/**
+ * 阶段 7 临时按钮 — 锁定后仍需可点击切回 Idle，
+ * 因此用 position:fixed 浮在蒙版之上（z-index > .lock-overlay 的 10）。
+ * 阶段 12 真热键接入后整体移除。
+ */
+.mock-run-btn {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--statusbar-height) + 12px);
+  z-index: 50;
+  padding: 6px 14px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--color-paper-white);
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  transition:
+    background var(--transition-fast) var(--ease-default),
+    transform var(--transition-fast) var(--ease-default);
+}
+
+.mock-run-btn:hover {
+  background: var(--accent-hover);
+}
+
+.mock-run-btn:active {
+  transform: translateY(1px);
+}
+
+.mock-run-btn.running {
+  background: var(--danger);
+}
+
+.mock-run-btn.running:hover {
+  background: color-mix(in srgb, var(--danger) 85%, white);
 }
 </style>
