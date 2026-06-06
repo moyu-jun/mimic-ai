@@ -12,15 +12,27 @@ import type { CapturedKey, KeyboardAction } from '../types/config'
 const DEFAULT_INTERVAL_MS = 20
 
 const capturedKey = ref<CapturedKey | null>(null)
+const duplicateHint = ref('')
+let duplicateTimer: number | null = null
+
+function showDuplicateHint(msg: string): void {
+  duplicateHint.value = msg
+  if (duplicateTimer !== null) window.clearTimeout(duplicateTimer)
+  duplicateTimer = window.setTimeout(() => {
+    duplicateHint.value = ''
+    duplicateTimer = null
+  }, 2000)
+}
 
 function addAction(): void {
   if (!capturedKey.value) return
 
-  // 已存在相同键位则拒绝添加，重置输入框
+  // 已存在相同键位则拒绝添加并提示
   const exists = appStore.keyboardActions.some(
     a => a.scanCode === capturedKey.value!.scanCode
   )
   if (exists) {
+    showDuplicateHint(`按键「${capturedKey.value.keyLabel}」已存在`)
     capturedKey.value = null
     return
   }
@@ -53,16 +65,21 @@ function toggleSelected(id: string): void {
 
 function onIntervalInput(action: KeyboardAction, e: Event): void {
   const target = e.target as HTMLInputElement
+  // 仅剥离非数字字符；允许中间态为空（用户清空后准备重新输入）
   const sanitized = target.value.replace(/[^0-9]/g, '')
-
+  if (target.value !== sanitized) target.value = sanitized
   const num = parseInt(sanitized, 10)
-  if (!isNaN(num) && num > 0) {
-    action.intervalMs = num
-    target.value = sanitized
-  } else {
-    // Reject zero and empty - reset to DEFAULT
+  if (!isNaN(num) && num > 0) action.intervalMs = num
+}
+
+function onIntervalCommit(action: KeyboardAction, e: Event): void {
+  const target = e.target as HTMLInputElement
+  const num = parseInt(target.value, 10)
+  if (isNaN(num) || num <= 0) {
     action.intervalMs = DEFAULT_INTERVAL_MS
     target.value = String(DEFAULT_INTERVAL_MS)
+  } else {
+    target.value = String(num)
   }
 }
 
@@ -74,6 +91,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   // 离开时回到 Idle（阶段 12 会由 set_current_page 统一管理）
   appStore.runtimeStatus = 'Idle'
+  if (duplicateTimer !== null) window.clearTimeout(duplicateTimer)
 })
 </script>
 
@@ -89,6 +107,7 @@ onBeforeUnmount(() => {
       >
         添加
       </button>
+      <span v-if="duplicateHint" class="duplicate-hint">{{ duplicateHint }}</span>
     </header>
 
     <div class="list-container">
@@ -114,9 +133,12 @@ onBeforeUnmount(() => {
           <span class="key-info">{{ action.keyLabel }}</span>
           <input
             type="text"
+            inputmode="numeric"
             class="interval-input"
             :value="action.intervalMs"
             @input="onIntervalInput(action, $event)"
+            @blur="onIntervalCommit(action, $event)"
+            @keydown.enter="onIntervalCommit(action, $event)"
           />
           <span class="unit">ms</span>
           <button
@@ -181,6 +203,18 @@ onBeforeUnmount(() => {
 .add-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.duplicate-hint {
+  font-size: 11px;
+  color: var(--warning);
+  white-space: nowrap;
+  animation: fade-in var(--transition-normal) var(--ease-default);
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .list-container {

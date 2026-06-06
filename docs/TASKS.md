@@ -321,7 +321,7 @@
    - 状态不匹配直接 `return`。
 6. 热键回调当前仅切换 `runtimeStatus` 并通过 `runtime_status_changed` 事件推送（按页面切到 `RunningKeyboard` / `RunningMouse`），**不实际跑模拟**。
 7. 前端 [src/pages/SettingsPage.vue](src/pages/SettingsPage.vue) 保存按钮接 `update_hotkeys`，按 `changed/registered/persisted` 给出小文字提示。
-8. 路由切换时调用 `set_current_page`；移除阶段 7 的临时 mock 切换按钮，蒙版改由 `runtime_status_changed` 驱动。
+8. 路由切换时调用 `set_current_page`；移除阶段 7 的临时 mock 切换按钮、**以及阶段 4-5 KeyboardPage.vue / MousePage.vue 中 `onMounted/onBeforeUnmount` 直接修改 `runtimeStatus` 的代码**，蒙版改由 `runtime_status_changed` 驱动。
 
 **可运行验收**：
 
@@ -405,7 +405,8 @@
 
 1. 错误状态、驱动缺失、热键注册失败、模拟异常的界面提示统一打磨。
 2. 600x400 下逐页核对文字 / 按钮 / 输入框无溢出、无截断。
-3. Windows 实机验证（待确认事项 #5、#6）：
+3. 替换 `index.html` 的 `<title>` 为 `Mimic`，替换 favicon 为项目品牌图标；同步替换 `AppTitleBar.vue` 中的 `/tauri.svg` 为正式应用图标。
+4. Windows 实机验证（待确认事项 #5、#6）：
    - 透明圆角窗口在 Windows + WebView2 下的实际效果；
    - 最小化 / 失焦后热键仍能触发；
    - Interception 在常见游戏窗口下的可用性；

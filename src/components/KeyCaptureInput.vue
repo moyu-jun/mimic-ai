@@ -4,7 +4,7 @@
  * 聚焦进入捕获状态，keydown 拦截 + 查白名单，回显 label + scanCode。
  * 白名单外按键不提示，继续等待；失焦未捕获时回显原值。
  */
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch } from 'vue'
 import { lookupKey } from '../lib/keyMap'
 import type { CapturedKey } from '../types/config'
 
@@ -26,7 +26,6 @@ const emit = defineEmits<Emits>()
 const inputRef = ref<HTMLInputElement | null>(null)
 const isCapturing = ref(false)
 const displayText = ref('')
-const snapshotBeforeFocus = ref<CapturedKey | null>(null)
 
 watch(
   () => props.modelValue,
@@ -41,21 +40,14 @@ watch(
 )
 
 function onFocus(): void {
-  snapshotBeforeFocus.value = props.modelValue
   isCapturing.value = true
   displayText.value = '请按下按键...'
 }
 
 function onBlur(): void {
   isCapturing.value = false
-  // 深度相等检查：失焦时若未捕获新键，回显失焦前快照
-  const unchanged =
-    props.modelValue?.keyLabel === snapshotBeforeFocus.value?.keyLabel &&
-    props.modelValue?.scanCode === snapshotBeforeFocus.value?.scanCode
-
-  if (unchanged) {
-    displayText.value = props.modelValue?.keyLabel || ''
-  }
+  // 失焦时一律以最新的 modelValue 为显示源（无论是否在捕获中变化过）
+  displayText.value = props.modelValue?.keyLabel ?? ''
 }
 
 function onKeyDown(e: KeyboardEvent): void {
@@ -73,12 +65,6 @@ function onKeyDown(e: KeyboardEvent): void {
   }
   // 白名单外 → 不提示错误，继续等待下一次按键（需求反馈 Q7）
 }
-
-onMounted(() => {
-  if (props.modelValue) {
-    displayText.value = props.modelValue.keyLabel
-  }
-})
 </script>
 
 <template>

@@ -30,16 +30,21 @@ function deleteAction(id: string): void {
 
 function onIntervalInput(action: MouseAction, e: Event): void {
   const target = e.target as HTMLInputElement
+  // 仅剥离非数字字符；允许中间态为空（用户清空后准备重新输入）
   const sanitized = target.value.replace(/[^0-9]/g, '')
-
+  if (target.value !== sanitized) target.value = sanitized
   const num = parseInt(sanitized, 10)
-  if (!isNaN(num) && num > 0) {
-    action.intervalMs = num
-    target.value = sanitized
-  } else {
-    // Reject zero and empty - reset to DEFAULT
+  if (!isNaN(num) && num > 0) action.intervalMs = num
+}
+
+function onIntervalCommit(action: MouseAction, e: Event): void {
+  const target = e.target as HTMLInputElement
+  const num = parseInt(target.value, 10)
+  if (isNaN(num) || num <= 0) {
     action.intervalMs = DEFAULT_INTERVAL_MS
     target.value = String(DEFAULT_INTERVAL_MS)
+  } else {
+    target.value = String(num)
   }
 }
 
@@ -87,9 +92,12 @@ onBeforeUnmount(() => {
         <div class="td interval-cell">
           <input
             type="text"
+            inputmode="numeric"
             class="interval-input"
             :value="action.intervalMs"
             @input="onIntervalInput(action, $event)"
+            @blur="onIntervalCommit(action, $event)"
+            @keydown.enter="onIntervalCommit(action, $event)"
           />
           <span class="unit">ms</span>
         </div>

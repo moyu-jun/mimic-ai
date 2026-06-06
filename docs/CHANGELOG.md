@@ -348,3 +348,56 @@
 - 「模拟运行（mock）」按钮按 TASKS 计划在阶段 12 移除；当前作为验证入口保留在首页右下角，启用时按钮变红显示「停止模拟」。
 - 蒙版进入/退出无过渡动画；阶段 16 打磨阶段如有需要再考虑 `opacity` fade（120ms）。
 
+---
+
+## Part A 收尾审查（阶段 1-7 整体复盘）
+
+**完成时间**：2026-06-07
+
+> 阶段 1-7 全部完成并经用户手动验证后做的整体代码审查与定向修复。本节不对应单一阶段，而是 Part A 收口前的一轮质量收敛，避免缺陷带入 Part B。
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/components/KeyCaptureInput.vue](../src/components/KeyCaptureInput.vue) | 改 | **H1**：删除 `snapshotBeforeFocus` 与 `onMounted` 钩子；`onBlur` 简化为 `displayText = props.modelValue?.keyLabel ?? ''`，语义清晰、不依赖快照 |
+| [src/pages/KeyboardPage.vue](../src/pages/KeyboardPage.vue) | 改 | **M1**：拆分 `onIntervalInput`（仅过滤非数字、允许中间空态）/ `onIntervalCommit`（blur/enter 时回退到 `DEFAULT_INTERVAL_MS`）；模板加 `inputmode="numeric"` + `@blur` + `@keydown.enter`。**M2**：重复 scanCode 时显示 2s 自动消失的橙色「按键「X」已存在」提示；`onBeforeUnmount` 清理定时器 |
+| [src/pages/MousePage.vue](../src/pages/MousePage.vue) | 改 | **M1**：同 KeyboardPage 的 `onIntervalInput / onIntervalCommit` 拆分与模板事件改造 |
+| [src/stores/appStore.ts](../src/stores/appStore.ts) | 改 | **L1**：在 `keyboardActions / mouseActions / hotkeys` 上方加 `TODO[阶段 8]` 注释，提醒接通 `load_config` 后必须清空 mock 初值 |
+| [src/styles/theme.css](../src/styles/theme.css) | 改 | **L2**：在 `--warning` 上方加注释，说明与 `--accent` 同源 Safety Orange 是设计意图，未来分开需同步改三处 |
+| [docs/TASKS.md](./TASKS.md) | 改 | **M3**：阶段 12 任务 8 显式追加「移除阶段 4-5 KeyboardPage / MousePage 中 `onMounted/onBeforeUnmount` 直接修改 `runtimeStatus` 的代码」。**M4**：阶段 16 新增第 3 条任务「替换 `index.html` `<title>` / favicon / AppTitleBar 应用图标」 |
+
+### 关键决策
+
+- **H1 删除快照机制而非修补**：`snapshotBeforeFocus` 是对失焦回显语义的过度防御 — 失焦时的"原值"本就是 `props.modelValue`（reactivity 会保持最新），快照反而引入"快照 vs modelValue"的对比歧义。直接以 `modelValue` 为准是 KISS 原则的体现。
+- **M1 拆分 input/commit 而非"立刻校正"**：原实现 `onInput` 内一遇到空/零就重置为 20，导致用户**连按 Backspace 全删都做不到**。拆分后中间态允许为空，仅在 `blur` / `Enter` 时回退到 default，与 DESIGN 15.6「失焦时持久化」语义一致，也为阶段 9 的"失焦写盘"铺路。`type="text"` + `inputmode="numeric"` 既保留禁止步进按钮的需求 3.3.2 约束，又符合数字输入语义。
+- **M2 重复键位给反馈而非静默吞掉**：原 `if (exists) { capturedKey.value = null; return; }` 看起来是去重，实际从用户视角是"按钮没反应"。改为 2s 自动消失的橙色 hint，复用 `--warning` 主题色与 `fade-in` 动画，与设置页保存提示风格一致。
+- **M3 / M4 改文档而非改代码**：阶段 4-5 的 `onMounted` 切状态代码当前是 mock 阶段的合理实现，删了反而破坏阶段 7 验收；favicon 替换属于阶段 16 收尾范畴。两者本质都是"工作清单遗漏"，所以在 TASKS 显式登记，避免被忘掉。
+- **不引入 lint 工具**：审查中发现两个页面的 `onIntervalInput` 函数体几乎同构（DRY 候选），但 Part A 已完成，此时抽公共工具属于"非必要重构"，违反外科手术式修改原则。建议留待阶段 9 真接 `save_config` 时一并提到 `src/lib/intervalInput.ts`。
+- **L9 `allow-start-dragging` 保留**：审查中怀疑可能多余，但确认 Tauri 2 的 `data-tauri-drag-region` 在 capability 模型下确实需要该权限，无需改动。
+
+### 验证结果
+
+- `npx vue-tsc --noEmit` — 通过：无 TS 错误，无未使用变量告警（`noUnusedLocals`/`noUnusedParameters` 严格模式下）。
+- `cargo check`（src-tauri）— 通过：1.55s，无 warning。
+- 手动核对修复点：
+  - H1：捕获框聚焦显示「请按下按键...」，未按键直接失焦回显原值；
+  - M1：间隔输入框可清空、输入中间态允许空字符串、失焦回退到 20、Enter 提交同效；
+  - M2：再次添加同一 scanCode 出现橙色 hint，2s 后消失。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 12 任务 8 追加移除 `onMounted/onBeforeUnmount` 切状态的指令；阶段 16 新增 favicon/title 替换任务。
+- [REQUIREMENTS.md](./REQUIREMENTS.md) / [DESIGN.md](./DESIGN.md) — 无改动（修复均在既有需求 / 设计语义内）。
+
+### 偏差与遗留
+
+- 审查中识别但暂不处理的 LOW 项（已在审查回执中说明）：
+  - L3：`KeyCaptureInput` 的 `'请按下按键...'` 文案硬编码（无 i18n 计划，按用户决定保留）。
+  - L5：CSS 滚动条仅写 `-webkit-scrollbar` 系（项目仅面向 Windows + WebView2，跨内核兼容性非目标）。
+  - L6：`src-tauri/src/lib.rs` 的 `greet` 模板代码与未使用的 `tauri-plugin-opener` 依赖（阶段 8 重写 `lib.rs` 时一并清理）。
+  - L8：`appStore` 未导出类型接口（Part A 不要求测试，可接受）。
+- 间隔输入过滤逻辑在两个页面同构（DRY 候选），留待阶段 9 一并抽到 `src/lib/`。
+- 实机交互体验（聚焦闪烁、间隔输入响应、提示动画流畅度）未在沙箱验证，随阶段 16 实机复核。
+
+

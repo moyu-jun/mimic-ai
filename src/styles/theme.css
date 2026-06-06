@@ -34,6 +34,7 @@
   --accent-hover:   var(--color-accent-hover);
   --accent-pressed: var(--color-accent-pressed);
   --success:        var(--color-neon-sprout);
+  /* 设计意图：--warning 与 --accent 同源（Safety Orange）；未来如需分开需同步改状态栏/权限行/按钮三处 */
   --warning:        var(--color-safety-orange);
   --danger:         var(--color-error-warm);
 
