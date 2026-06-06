@@ -2,11 +2,12 @@
 /**
  * 左侧菜单 — 需求 3.2
  * 主菜单（首页 / 按键模拟 / 鼠标模拟）置顶，「设置」固定底部。
- * 激活项使用强调色左条 + 高亮背景。
+ * 激活项使用强调色左条 + 高亮背景；菜单项左侧带线性图标。
  */
 import { appStore, setPage } from '../stores/appStore'
 import { PAGE_LABELS, MAIN_PAGES } from '../lib/pages'
 import type { AppPage } from '../types/config'
+import MenuIcon from './MenuIcon.vue'
 
 function isActive(page: AppPage): boolean {
   return appStore.currentPage === page
@@ -25,7 +26,8 @@ function isActive(page: AppPage): boolean {
         :aria-current="isActive(page) ? 'page' : undefined"
         @click="setPage(page)"
       >
-        {{ PAGE_LABELS[page] }}
+        <MenuIcon :name="page" />
+        <span class="menu-label">{{ PAGE_LABELS[page] }}</span>
       </button>
     </div>
     <div class="menu-bottom">
@@ -36,7 +38,8 @@ function isActive(page: AppPage): boolean {
         :aria-current="isActive('settings') ? 'page' : undefined"
         @click="setPage('settings')"
       >
-        {{ PAGE_LABELS.settings }}
+        <MenuIcon name="settings" />
+        <span class="menu-label">{{ PAGE_LABELS.settings }}</span>
       </button>
     </div>
   </nav>
@@ -64,6 +67,7 @@ function isActive(page: AppPage): boolean {
   position: relative;
   display: flex;
   align-items: center;
+  gap: 8px;
   width: 100%;
   height: 34px;
   padding: 0 12px;
@@ -74,6 +78,11 @@ function isActive(page: AppPage): boolean {
   transition:
     background var(--transition-fast) var(--ease-default),
     color var(--transition-fast) var(--ease-default);
+}
+
+.menu-label {
+  flex: 1;
+  min-width: 0;
 }
 
 .menu-item:hover {
