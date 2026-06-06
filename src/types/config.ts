@@ -33,3 +33,11 @@ export interface KeyboardAction {
   scanCode: number
   intervalMs: number
 }
+
+/** 鼠标模拟单项动作（DESIGN 4.1） */
+export interface MouseAction {
+  id: string
+  x: number | null
+  y: number | null
+  intervalMs: number
+}

@@ -1,24 +1,303 @@
 <script setup lang="ts">
-/** 鼠标模拟页 — 阶段 2 占位，阶段 5 渲染鼠标动作列表。 */
+/**
+ * 鼠标模拟页 — 需求 3.3.3 / DESIGN 15.6
+ * 列表：X坐标（只读）/ Y坐标（只读）/ 间隔 / 坐标拾取按钮 / 删除按钮。
+ * 阶段 5 数据全部 mock 前端，坐标拾取按钮仅 console.log 占位。
+ */
+import { onMounted, onBeforeUnmount } from 'vue'
+import { appStore } from '../stores/appStore'
+import type { MouseAction } from '../types/config'
+
+const DEFAULT_INTERVAL_MS = 20
+
+function addAction(): void {
+  const newAction: MouseAction = {
+    id: `mouse-${Date.now()}`,
+    x: null,
+    y: null,
+    intervalMs: DEFAULT_INTERVAL_MS,
+  }
+
+  appStore.mouseActions.push(newAction)
+}
+
+function deleteAction(id: string): void {
+  const idx = appStore.mouseActions.findIndex(a => a.id === id)
+  if (idx !== -1) {
+    appStore.mouseActions.splice(idx, 1)
+  }
+}
+
+function onIntervalInput(action: MouseAction, e: Event): void {
+  const target = e.target as HTMLInputElement
+  const sanitized = target.value.replace(/[^0-9]/g, '')
+
+  const num = parseInt(sanitized, 10)
+  if (!isNaN(num) && num > 0) {
+    action.intervalMs = num
+    target.value = sanitized
+  } else {
+    // Reject zero and empty - reset to DEFAULT
+    action.intervalMs = DEFAULT_INTERVAL_MS
+    target.value = String(DEFAULT_INTERVAL_MS)
+  }
+}
+
+function startPickPosition(id: string): void {
+  // 阶段 5 占位：仅 console.log，阶段 14 接真实命令
+  console.log('[MousePage] 坐标拾取占位 —', id)
+}
+
+onMounted(() => {
+  // 阶段 5 mock：进入鼠标页时切换到 ReadyMouse（TASKS 任务 5）
+  appStore.runtimeStatus = 'ReadyMouse'
+})
+
+onBeforeUnmount(() => {
+  // 离开时回到 Idle（阶段 12 会由 set_current_page 统一管理）
+  appStore.runtimeStatus = 'Idle'
+})
 </script>
 
 <template>
-  <section class="page">
-    <p class="placeholder">鼠标模拟</p>
+  <section class="mouse-page">
+    <div class="list-container">
+      <div v-if="!appStore.mouseActions.length" class="empty-hint">
+        暂无鼠标动作
+      </div>
+      <div v-else class="list-scroll">
+        <div
+          v-for="action in appStore.mouseActions"
+          :key="action.id"
+          class="list-row"
+        >
+          <div class="coord-display">
+            <span class="coord-label">X</span>
+            <span class="coord-value">{{
+              action.x !== null ? action.x : '—'
+            }}</span>
+          </div>
+          <div class="coord-display">
+            <span class="coord-label">Y</span>
+            <span class="coord-value">{{
+              action.y !== null ? action.y : '—'
+            }}</span>
+          </div>
+          <input
+            type="text"
+            class="interval-input"
+            :value="action.intervalMs"
+            @input="onIntervalInput(action, $event)"
+          />
+          <span class="unit">ms</span>
+          <button
+            type="button"
+            class="pick-btn"
+            @click="startPickPosition(action.id)"
+          >
+            坐标拾取
+          </button>
+          <button
+            type="button"
+            class="delete-btn"
+            aria-label="删除"
+            @click="deleteAction(action.id)"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+              <path
+                d="M3 3 L11 11 M11 3 L3 11"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <footer class="bottom-bar">
+      <button type="button" class="add-btn" @click="addAction">添加</button>
+    </footer>
   </section>
 </template>
 
 <style scoped>
-.page {
+.mouse-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 14px 16px;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.list-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.empty-hint {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 100%;
   height: 100%;
+  font-size: 12px;
+  color: var(--text-disabled);
 }
 
-.placeholder {
-  font-size: 14px;
+.list-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  min-height: 36px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+}
+
+.coord-display {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.coord-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.coord-value {
+  width: 50px;
+  font-size: 12px;
+  color: var(--text-primary);
+  font-family: 'Consolas', 'Courier New', monospace;
+  text-align: right;
+}
+
+.interval-input {
+  width: 60px;
+  height: 24px;
+  padding: 0 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--text-primary);
+  text-align: center;
+  transition: border-color var(--transition-fast) var(--ease-default);
+}
+
+.interval-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.unit {
+  font-size: 11px;
   color: var(--text-disabled);
+}
+
+.pick-btn {
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 500;
+  transition:
+    background var(--transition-fast) var(--ease-default),
+    border-color var(--transition-fast) var(--ease-default);
+}
+
+.pick-btn:hover {
+  background: var(--bg-secondary);
+  border-color: var(--accent);
+}
+
+.pick-btn:active {
+  background: var(--bg-primary);
+}
+
+.delete-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  color: var(--text-secondary);
+  transition:
+    background var(--transition-fast) var(--ease-default),
+    color var(--transition-fast) var(--ease-default);
+}
+
+.delete-btn:hover {
+  background: var(--bg-elevated);
+  color: var(--danger);
+}
+
+.delete-btn:active {
+  background: var(--bg-primary);
+}
+
+.bottom-bar {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.add-btn {
+  height: 30px;
+  padding: 0 20px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--color-paper-white);
+  font-size: 12px;
+  font-weight: 500;
+  transition: background var(--transition-fast) var(--ease-default);
+}
+
+.add-btn:hover {
+  background: var(--accent-hover);
+}
+
+.add-btn:active {
+  background: var(--accent-pressed);
+}
+
+/* 滚动条样式 */
+.list-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.list-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.list-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+.list-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--text-disabled);
 }
 </style>

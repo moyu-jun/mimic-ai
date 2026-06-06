@@ -6,7 +6,7 @@
  */
 
 import { reactive } from 'vue'
-import type { AppPage, RuntimeStatus, KeyboardAction } from '../types/config'
+import type { AppPage, RuntimeStatus, KeyboardAction, MouseAction } from '../types/config'
 
 export const appStore = reactive({
   /** 当前激活页面，默认首页 */
@@ -25,6 +25,15 @@ export const appStore = reactive({
       intervalMs: 20,
     },
   ] as KeyboardAction[],
+  /** 鼠标动作列表（阶段 5 mock，阶段 8 起由 load_config 提供） */
+  mouseActions: [
+    {
+      id: 'mock-mouse-1',
+      x: null,
+      y: null,
+      intervalMs: 20,
+    },
+  ] as MouseAction[],
 })
 
 /** 切换当前页面（后续阶段会在此处追加 set_current_page 后端调用） */

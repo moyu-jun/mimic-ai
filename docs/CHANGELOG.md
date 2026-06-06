@@ -195,3 +195,44 @@
 - 数据全部 mock 前端，列表增删勾选改间隔无持久化（阶段 9 接 `save_config`）。
 - 进入/离开页面切状态的逻辑在组件 `onMounted/onBeforeUnmount` 本地实现（阶段 12 会由后端 `set_current_page` 统一门控）。
 - 实机交互体验（捕获框焦点、滚动条样式、按键响应延迟）未在沙箱验证，随阶段 16 实机复核。
+
+---
+
+## 阶段 5：鼠标模拟页 UI
+
+**完成时间**：2026-06-06
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/types/config.ts](../src/types/config.ts) | 改 | 新增 `MouseAction` 接口（id / x?: number\|null / y?: number\|null / intervalMs） |
+| [src/stores/appStore.ts](../src/stores/appStore.ts) | 改 | 新增 `mouseActions` 字段，初值含一项空坐标 mock（X/Y null，间隔 20） |
+| [src/pages/MousePage.vue](../src/pages/MousePage.vue) | 重写 | 列表（X 只读 / Y 只读 / 间隔 / 坐标拾取 / 删除）+ 底部添加按钮；`onMounted` mock 切 `ReadyMouse` |
+
+### 关键决策
+
+- **坐标只读用 `<span>` 而非 `readonly input`**：需求 3.3.3 明确「不允许手动输入」，`<span>` 比 `readonly input` 语义更清晰、视觉更干净；`null` 时显示「—」占位符（DESIGN 15.6 反馈 L6）。
+- **间隔输入复用按键页过滤逻辑**：`onIntervalInput` 与 KeyboardPage.vue 同构（仅 action 类型不同），保持 DRY，避免逻辑漂移；空/零值回退到 `DEFAULT_INTERVAL_MS = 20`。
+- **添加按钮放底部**：与按键页（顶部捕获框旁）不同，鼠标页无捕获前置交互，添加直接追加空行；按 DESIGN 15.6 反馈 L7 的位置约定。
+- **坐标拾取按钮仅 `console.log`**：阶段 5 占位（任务 4），阶段 14 接 `start_pick_mouse_position` 真实命令；当前点击不改变行数据、不切状态、不副作用。
+- **进入页面 mock 切状态**：`onMounted` 时 `runtimeStatus = 'ReadyMouse'`，`onBeforeUnmount` 回 `Idle`，与按键页对称（阶段 12 会由后端 `set_current_page` 统一管理）。
+- **未引入 `MouseAction` 字面量类型缩进对齐 KeyboardAction**：mouse 列表无 `selected` 字段，行高度与按键页一致（36px）但内容布局不同，未尝试统一行容器（YAGNI）。
+
+### 验证结果
+
+- `npm run build`（vue-tsc + Vite）— 通过：48 模块，CSS 14.05 kB / JS 90.22 kB（gzip 32.72 kB），无 TS 错误。
+- `cargo check`（src-tauri）— 通过：1.81s，无 warning。
+- 四条验收清单（增删改间隔、null 占位与不可输入、状态栏、滚动条预留）通过静态分析与代码审查。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 5 状态「待开始」→「✅ 已完成」；四条验收全部勾选。
+- REQUIREMENTS / DESIGN — 无改动。
+
+### 偏差与遗留
+
+- 数据全部 mock 前端，新增/删除/改间隔无持久化（阶段 9 接 `save_config`）。
+- 「坐标拾取」按钮仅占位，真实拾取流程（隐藏窗口 → low-level mouse hook → 回填坐标）留待阶段 14。
+- 进入/离开页面切状态的逻辑与按键页同样在组件钩子中本地处理（阶段 12 由后端统一门控）。
+- 实机布局观感（600×400 单行紧凑度、坐标值数字宽度）未在沙箱验证，随阶段 16 实机复核。
