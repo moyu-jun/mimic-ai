@@ -12,9 +12,17 @@
   "app": {
     "windows": [
       {
-        "title": "mimic-ai",
-        "width": 800,
-        "height": 600
+        "title": "Mimic",
+        "width": 600,
+        "height": 400,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "center": true,
+        "shadow": false
       }
     ],
     "security": {

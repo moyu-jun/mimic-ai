@@ -1,0 +1,52 @@
+/**
+ * 主题变量 — 来源 DESIGN.md 15.1
+ * 所有色值、间距、动画时长统一在此定义，组件不得硬编码颜色。
+ */
+
+:root {
+  /* === 品牌色盘（来源：extra/color_palette.jpg） === */
+  --color-graphite-900: #23262C;  /* RGB(35,38,44)   主背景 */
+  --color-graphite-700: #3A3F47;  /* RGB(58,63,71)   容器/卡片 */
+  --color-cloud-zinc:   #D1D5DB;  /* RGB(209,213,219) 次要文本 */
+  --color-safety-orange:#FE7733;  /* RGB(254,119,51)  强调/警告 */
+  --color-neon-sprout:  #B1FA63;  /* RGB(177,250,99)  成功/运行 */
+  --color-paper-white:  #FFFFFF;  /* RGB(255,255,255) 主文本 */
+
+  /* === 补充色（语义扩展） === */
+  --color-graphite-elevated: #2C2F36;  /* 介于 900/700 之间，hover 用 */
+  --color-border-default:    #4A4F58;  /* 由 700 提亮一档 */
+  --color-border-subtle:     #2F333A;  /* 细分隔线 */
+  --color-text-disabled:     #6B7079;  /* 未勾选行、禁用状态 */
+  --color-error-warm:        #FF5A4A;  /* 错误状态专用（暖红） */
+  --color-accent-hover:      #FF8A4D;  /* Safety Orange hover */
+  --color-accent-pressed:    #E5611E;  /* Safety Orange pressed */
+
+  /* === 语义映射 === */
+  --bg-primary:     var(--color-graphite-900);
+  --bg-secondary:   var(--color-graphite-700);
+  --bg-elevated:    var(--color-graphite-elevated);
+  --border-color:   var(--color-border-default);
+  --border-subtle:  var(--color-border-subtle);
+  --text-primary:   var(--color-paper-white);
+  --text-secondary: var(--color-cloud-zinc);
+  --text-disabled:  var(--color-text-disabled);
+  --accent:         var(--color-safety-orange);
+  --accent-hover:   var(--color-accent-hover);
+  --accent-pressed: var(--color-accent-pressed);
+  --success:        var(--color-neon-sprout);
+  --warning:        var(--color-safety-orange);
+  --danger:         var(--color-error-warm);
+
+  /* === 布局尺寸 === */
+  --window-width: 600px;
+  --window-height: 400px;
+  --window-radius: 12px;
+  --titlebar-height: 40px;
+  --sidebar-width: 180px;
+  --statusbar-height: 32px;
+
+  /* === 动画时长（DESIGN 15.1） === */
+  --transition-fast: 120ms;
+  --transition-normal: 220ms;
+  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);
+}
