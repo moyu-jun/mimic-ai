@@ -142,12 +142,11 @@ onBeforeUnmount(() => {
 }
 
 .form {
-  flex: 1;
-  min-height: 0;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 16px 18px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
@@ -174,6 +173,7 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 12px;
   height: 32px;
+  margin-top: auto;
 }
 
 .save-msg {

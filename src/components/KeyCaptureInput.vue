@@ -101,7 +101,7 @@ onMounted(() => {
   width: 140px;
   height: 30px;
   padding: 0 10px;
-  background: var(--bg-secondary);
+  background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
   font-size: 13px;
@@ -121,7 +121,7 @@ onMounted(() => {
 .key-input:focus {
   outline: none;
   border-color: var(--accent);
-  background: var(--bg-elevated);
+  background: var(--bg-primary);
 }
 
 .key-input.capturing {
