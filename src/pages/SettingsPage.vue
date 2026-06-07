@@ -2,12 +2,13 @@
 /**
  * 设置页 — 需求 3.3.4 / DESIGN 15.6
  * 复用 KeyCaptureInput 渲染启动 / 停止热键；保存按钮对比快照，有变化才提示。
- * 阶段 6 mock：保存仅显示「已保存（mock）」，阶段 12 接 update_hotkeys 真实命令。
+ * 阶段 9：保存时调用 save_config 持久化到 INI 文件。
  */
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { appStore } from '../stores/appStore'
 import KeyCaptureInput from '../components/KeyCaptureInput.vue'
-import type { CapturedKey, HotkeyConfig } from '../types/config'
+import type { CapturedKey, HotkeyConfig, AppConfig } from '../types/config'
 
 /** 已持久化快照（用于保存时对比是否真的变更） */
 const persistedSnapshot = ref<HotkeyConfig>(cloneHotkeys(appStore.hotkeys))
@@ -49,20 +50,37 @@ function showMessage(text: string): void {
   }, 2000)
 }
 
-function onSave(): void {
+async function onSave(): Promise<void> {
   if (!startKey.value || !stopKey.value) return
   if (!isDirty.value) {
     // 无变化不提示（需求 3.3.4）
     return
   }
 
-  // 阶段 6 mock：直接写入 store + 更新快照；阶段 12 接 update_hotkeys 真实命令
-  appStore.hotkeys = {
-    start: cloneKey(startKey.value),
-    stop: cloneKey(stopKey.value),
+  try {
+    // 阶段 9：构造完整配置对象并调用 save_config 持久化
+    const updatedConfig: AppConfig = {
+      keyboardActions: appStore.keyboardActions,
+      mouseActions: appStore.mouseActions,
+      hotkeys: {
+        start: cloneKey(startKey.value),
+        stop: cloneKey(stopKey.value),
+      },
+    }
+
+    // 调用后端持久化命令
+    await invoke('save_config', { config: updatedConfig })
+
+    // 持久化成功后更新 store 和快照
+    appStore.hotkeys = updatedConfig.hotkeys
+    persistedSnapshot.value = cloneHotkeys(appStore.hotkeys)
+    showMessage('已保存')
+  } catch (err) {
+    // 持久化失败时显示详细错误提示
+    const errorMsg = err instanceof Error ? err.message : String(err)
+    showMessage(`保存失败: ${errorMsg}`)
+    console.error('Failed to save config:', err)
   }
-  persistedSnapshot.value = cloneHotkeys(appStore.hotkeys)
-  showMessage('已保存（mock）')
 }
 
 onMounted(() => {

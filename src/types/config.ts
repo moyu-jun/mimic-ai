@@ -47,3 +47,10 @@ export interface HotkeyConfig {
   start: CapturedKey
   stop: CapturedKey
 }
+
+/** 应用完整配置（DESIGN 4.1） */
+export interface AppConfig {
+  keyboardActions: KeyboardAction[]
+  mouseActions: MouseAction[]
+  hotkeys: HotkeyConfig
+}
