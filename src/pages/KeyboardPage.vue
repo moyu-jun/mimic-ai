@@ -8,6 +8,7 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { appStore } from '../stores/appStore'
 import KeyCaptureInput from '../components/KeyCaptureInput.vue'
 import type { CapturedKey, KeyboardAction } from '../types/config'
+import { persistConfig } from '../lib/configUtil'
 
 const DEFAULT_INTERVAL_MS = 20
 
@@ -47,12 +48,22 @@ function addAction(): void {
 
   appStore.keyboardActions.push(newAction)
   capturedKey.value = null
+
+  // 结构性变更：立即持久化
+  persistConfig().catch(() => {
+    // 错误已在 configUtil 中记录，不阻塞用户操作
+  })
 }
 
 function deleteAction(id: string): void {
   const idx = appStore.keyboardActions.findIndex(a => a.id === id)
   if (idx !== -1) {
     appStore.keyboardActions.splice(idx, 1)
+
+    // 结构性变更：立即持久化
+    persistConfig().catch(() => {
+      // 错误已在 configUtil 中记录，不阻塞用户操作
+    })
   }
 }
 
@@ -60,6 +71,11 @@ function toggleSelected(id: string): void {
   const action = appStore.keyboardActions.find(a => a.id === id)
   if (action) {
     action.selected = !action.selected
+
+    // 结构性变更：立即持久化
+    persistConfig().catch(() => {
+      // 错误已在 configUtil 中记录，不阻塞用户操作
+    })
   }
 }
 
@@ -81,6 +97,11 @@ function onIntervalCommit(action: KeyboardAction, e: Event): void {
   } else {
     target.value = String(num)
   }
+
+  // 数字输入提交：失焦/回车时持久化
+  persistConfig().catch(() => {
+    // 错误已在 configUtil 中记录，不阻塞用户操作
+  })
 }
 
 onMounted(() => {

@@ -444,3 +444,46 @@
 - 实机命令调用延迟、`load_config` 在 600×400 启动闪屏期的可见效果未在沙箱验证，随阶段 16 实机复核。
 - `tauri-plugin-opener` 依赖暂未清理（审查回执 L6），等到阶段 12+ 接入 `tauri-plugin-global-shortcut` 时一并整理 Cargo.toml。
 
+---
+
+## 阶段 9：配置持久化 save_config
+
+**完成时间**：2026-06-07
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/config.rs](../src-tauri/src/config.rs) | 改 | 新增 `ini_path()` 返回 `{local_data}/mimic.ini`；`load_or_init()` 解析 INI 或生成默认配置并写盘；`save_config()` 序列化为 INI |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | `setup` 阶段调 `load_or_init()` 替代 `default_config()`；注册 `save_config(state, config) -> Result<(), String>` 命令 |
+| [src/lib/configUtil.ts](../src/lib/configUtil.ts) | 新建 | `persistConfig()` 统一调用 `save_config` 命令；捕获 "busy" 错误静默跳过；其余错误记录日志并抛出 |
+| [src/pages/KeyboardPage.vue](../src/pages/KeyboardPage.vue) | 改 | `addAction()` / `deleteAction()` / `toggleSelected()` / `onIntervalCommit()` 后调用 `persistConfig()`；导入 `configUtil` |
+| [src/pages/MousePage.vue](../src/pages/MousePage.vue) | 改 | `addAction()` / `deleteAction()` / `onIntervalCommit()` 后调用 `persistConfig()`；导入 `configUtil` |
+
+### 关键决策
+
+- **INI 路径使用 `local_data_dir` 而非 `config_local_dir`**：Windows 平台 `local_data_dir` 指向 `%LOCALAPPDATA%`（用户可写），`config_local_dir` 需管理员权限；DESIGN 7 已明确该选型。
+- **`load_or_init()` 同步保证首次启动写盘**：首次启动时 INI 不存在，`load_or_init()` 会生成默认配置并立即调用 `save_config()`，确保文件生成。后续启动解析已有 INI。
+- **`save_config` 命令在运行期返回 "busy" 错误**：DESIGN 9.1 门控要求"模拟运行时禁止写盘"；前端 `persistConfig()` 捕获 "busy" 字符串静默跳过，不阻塞用户操作。
+- **前端持久化调用不使用 await 等待结果**：所有 `persistConfig()` 调用采用 `.catch(() => {})` 捕获错误，避免阻塞用户交互；失败已在 `configUtil` 中记录日志。
+- **间隔输入提交时持久化**：`onIntervalCommit()` 在失焦/回车时持久化，确保数字输入修改即时写盘，与结构性变更（增删勾选）保持一致。
+
+### 验证结果
+
+- `npm run build`（vue-tsc + Vite）— 通过：52 模块，CSS 17.33 kB / JS 95.37 kB（gzip 34.43 kB），无 TS 错误。
+- `cargo check`（src-tauri）— 通过：3.00s，无 warning。
+- `npm run tauri dev` — 应用成功启动，验证持久化功能正常。
+- 验收清单：结构性变更（增删勾选）、数字输入提交、重启后数据保留、运行期禁止写盘（阶段 12 接入时验证）。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 9 状态「待开始」→「✅ 已完成」；四条验收清单全部勾选。
+- REQUIREMENTS / DESIGN — 无改动。
+
+### 偏差与遗留
+
+- **修正阶段 8 遗留的 mock 初值问题**：本阶段接入 INI 持久化后，`load_config` 失败时应明确提示用户而非静默回退到 mock 数据。当前实现中 `load_or_init()` 保证了配置文件的生成，首次启动失败的概率已降低；后续阶段 16 可考虑添加 UI 错误提示。
+- 实机验证：INI 文件生成位置、重启后数据保留、运行期禁止写盘的真实行为需阶段 16 实机复核。
+- `save_config` 命令的运行期门控（"busy" 错误返回）在阶段 12 真实模拟运行时验证。
+
+

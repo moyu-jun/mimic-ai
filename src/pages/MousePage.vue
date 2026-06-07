@@ -7,6 +7,7 @@
 import { onMounted, onBeforeUnmount } from 'vue'
 import { appStore } from '../stores/appStore'
 import type { MouseAction } from '../types/config'
+import { persistConfig } from '../lib/configUtil'
 
 const DEFAULT_INTERVAL_MS = 20
 
@@ -19,12 +20,22 @@ function addAction(): void {
   }
 
   appStore.mouseActions.push(newAction)
+
+  // 结构性变更：立即持久化
+  persistConfig().catch(() => {
+    // 错误已在 configUtil 中记录，不阻塞用户操作
+  })
 }
 
 function deleteAction(id: string): void {
   const idx = appStore.mouseActions.findIndex(a => a.id === id)
   if (idx !== -1) {
     appStore.mouseActions.splice(idx, 1)
+
+    // 结构性变更：立即持久化
+    persistConfig().catch(() => {
+      // 错误已在 configUtil 中记录，不阻塞用户操作
+    })
   }
 }
 
@@ -46,6 +57,11 @@ function onIntervalCommit(action: MouseAction, e: Event): void {
   } else {
     target.value = String(num)
   }
+
+  // 数字输入提交：失焦/回车时持久化
+  persistConfig().catch(() => {
+    // 错误已在 configUtil 中记录，不阻塞用户操作
+  })
 }
 
 function startPickPosition(id: string): void {
