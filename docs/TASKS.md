@@ -253,29 +253,31 @@
 
 ### 阶段 10：日志 + 权限检测 + 首页权限状态
 
-**目标**：可观测性 + 启动权限策略落地（采用 DESIGN 14.1 降级启动方案）。
+**目标**：可观测性 + 启动权限策略落地（采用 DESIGN 14.1「启动期请求 + 拒绝降级」方案）。
 
 任务：
 
 1. 接入 `tauri-plugin-log`：开发 `info`、release `error`；目标至少包含 stdout 与日志目录。
 2. 在 [src-tauri/src/lib.rs](src-tauri/src/lib.rs) `setup` 钩子内按 DESIGN 13.1 顺序记录:应用启动、配置路径、INI 创建/解析失败/覆盖默认。
 3. 在配置 / 热键 / 驱动 / 模拟相关位置预埋 `info!` / `error!` 调用。
-4. **降级启动**（REQUIREMENTS 2 / DESIGN 14.1）：**不在程序清单中强制** `requireAdministrator`；改为运行时检测。
+4. **启动期请求 UAC + 拒绝降级**（REQUIREMENTS 2 / DESIGN 14.1）：**不在程序清单中强制** `requireAdministrator`；改为 `pub fn run()` 入口主动检测 + 调度。
 5. 实现 `is_admin() -> bool`（Windows API：`OpenProcessToken` + `GetTokenInformation` 查询 `TokenElevation`），并新增命令 `get_admin_status -> bool`。
-6. 在首页将 mock 的「管理员权限」状态改为调用 `get_admin_status`：
+6. 在 `pub fn run()` 进入 `tauri::Builder` 之前调用 `is_admin()`：未提权时调 `restart_as_admin()` → 成功则 `std::process::exit(0)`；用户拒绝 / 失败则继续以普通权限启动。
+7. 在首页将 mock 的「管理员权限」状态改为调用 `get_admin_status`：
    - 已授权：绿色「管理员权限已授予」；
-   - 未授权：橙色警告「管理员权限受限，部分功能不可用」，附「以管理员身份重启」按钮（点击后通过 `runas` 重启自身并退出当前进程）。
-7. 在关键位置加 `// ADMIN_POLICY:` 标记（启动检测、驱动安装、模拟运行）。
+   - 未授权（用户首次拒绝 UAC）：橙色警告「管理员权限受限,部分功能不可用」,附「以管理员身份重启」按钮（点击后通过 `runas` 重启自身并退出当前进程）。
+8. 在关键位置加 `// ADMIN_POLICY:` 标记（`run()` 启动检测、命令实现、`admin.rs` 模块顶部）。
 
 **可运行验收**：
 
-- [ ] 普通双击启动**不弹** UAC，应用能正常开界面。
-- [ ] 未授权时首页明确显示橙色权限提示。
-- [ ] 「以管理员身份重启」按钮触发 UAC，重启后首页变绿色「已授予」。
+- [ ] 普通双击启动**会弹** UAC 请求；同意后以管理员权限运行（首页绿色「已授予」）。
+- [ ] 拒绝 UAC 时应用仍能正常打开界面（不阻断启动）。
+- [ ] 拒绝 UAC 后首页明确显示橙色权限提示。
+- [ ] 「以管理员身份重启」按钮再次触发 UAC，重启后首页变绿色「已授予」。
 - [ ] 开发模式日志可见配置路径、INI 加载结果、权限状态。
 - [ ] release 包仅记录 `error` 级。
 
-> 阶段 10 静态验收（构建 / 类型检查 / 命令注册）已通过；上述五项 UAC、UI 行为依赖实机交互，
+> 阶段 10 静态验收（构建 / 类型检查 / 命令注册）已通过；上述六项 UAC、UI 行为依赖实机交互，
 > 与阶段 16 一并复核。
 
 ---

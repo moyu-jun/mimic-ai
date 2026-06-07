@@ -544,3 +544,21 @@
 - **`request_admin_restart` 在用户拒绝 UAC 后未自动复位 `isRestarting` 的 200ms 间隙**：理论上有一段非常短的窗口（用户秒拒 UAC + 后端尚未触发延迟退出）按钮显示「正在重启...」但其实命令已 reject 抛错回前端 — 这条路径前端 catch 后已立即把 `isRestarting` 设回 false，但视觉上可能闪烁一帧。属于 LOW 级体验问题，阶段 16 打磨时若实机观察到再处理。
 - **`tauri-plugin-opener` 未清理**：审查回执 L6 提及，但当前阶段未触动 opener；阶段 12 接全局热键时一并清理（与 opener 无依赖关系，但收口动作放一起更整洁）。
 
+### 后续微调（同日）
+
+阶段 10 初版按「降级启动 + 不主动弹 UAC」实现；用户反馈应改为「启动时主动请求 UAC + 拒绝降级」。
+
+| 改动 | 处理 |
+|------|------|
+| `pub fn run()` 入口加启动期 UAC 请求 | 进入 `tauri::Builder` 前先 `admin::is_admin()`：未提权 → `restart_as_admin()`；成功则当前进程 `std::process::exit(0)` 让新提权进程接管，失败/用户拒绝则记录 `eprintln!` 后继续降级启动 |
+| 启动期日志改用 `eprintln!` | 该时序点 tauri-plugin-log 尚未装配，`log::*` 宏会被丢弃；走 stderr 让 dev 控制台仍可见，且 setup 阶段会再调一次 `is_admin()` 通过插件正式入日志 |
+| 首页 UI 行为不变 | 用户拒绝 UAC 后 `is_admin()` 仍返回 false，自动走「橙色受限 + 重启按钮」分支 — 无需改前端 |
+| 文档同步 | [REQUIREMENTS.md](./REQUIREMENTS.md) 第 2 节、[DESIGN.md](./DESIGN.md) 14.1 / 14.2、[TASKS.md](./TASKS.md) 阶段 10 任务描述与六条验收点（新增「会弹 UAC + 同意以管理员权限运行」一条） |
+
+**关键决策**：
+- **不在 manifest 设 `requireAdministrator` 而是运行时主动调度**：manifest 模式拒绝 UAC 会让应用直接启动失败；运行时 `ShellExecuteW("runas")` 模式拒绝时返回错误,Rust 侧捕获后即可降级继续 — 这是「拒绝 UAC 即降级」灵活性的关键。
+- **UAC 调度在 `tauri::Builder` 之前**：必须在任何 Tauri 资源（窗口、insecure_origin、IPC）创建前完成提权切换，否则新进程会与旧进程共享文件句柄 / 端口造成冲突。提前到 `pub fn run()` 入口最早处。
+- **`exit(0)` 而非 `panic!` / `unreachable!`**：UAC 调度成功后旧进程必须立刻退出，否则用户屏幕上会同时存在两个 Mimic 窗口（一旧一新）。`exit(0)` 是 Windows 下立刻终结进程的最直接手段，也避免 Rust 析构链触发可能的 Tauri 残留资源释放。
+
+`cargo check` 验证通过：4.17s，无 warning。
+

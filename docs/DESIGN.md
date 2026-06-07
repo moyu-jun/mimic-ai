@@ -682,33 +682,39 @@ pub fn run_keyboard_simulation() {
 }
 ```
 
-### 14.1 启动提权配置（更新：改为降级启动）
+### 14.1 启动提权配置（更新：启动期请求 + 拒绝降级）
 
-**策略变更**：未授权管理员权限时应用仍可启动（对应反馈 L11/E8/Q1）。
+**策略变更**：启动时主动请求 UAC 提权，用户拒绝时降级启动（对应反馈 L11/E8/Q1）。
 
-- **检测管理员权限**：启动时调用 Windows API 检查当前进程是否以管理员身份运行。
-- **未授权时行为**：
-  - 应用正常启动，不弹 UAC 提权对话框。
-  - 首页显示"管理员权限受限，部分功能不可用"（橙色警告）。
-  - 驱动检测可正常执行（读注册表 + 文件系统，不需管理员权限）。
-  - 驱动安装需管理员权限：点击"安装驱动"按钮时，后端通过 `runas` 以管理员身份重启安装进程，安装完成后自动退出，用户需手动重启应用。
-  - 模拟运行需管理员权限：启动热键触发时检查权限，无权限时拒绝并提示"需要管理员权限"。
+- **检测管理员权限**：进入 `tauri::Builder` 之前，调用 Windows API 检查当前进程是否以管理员身份运行。
+- **未授权时主动请求提权**：`ShellExecuteW + "runas"` 触发 UAC 弹窗：
+  - **用户同意** → 新提权进程接管，当前进程立即 `std::process::exit(0)` 退出，避免双开。
+  - **用户拒绝**（或 UAC 调度失败）→ 当前进程继续以普通权限启动，进入降级模式：
+    - 应用正常打开，不阻断启动流程。
+    - 首页显示「管理员权限受限，部分功能不可用」（橙色警告）+「以管理员身份重启」按钮。
+    - 驱动检测可正常执行（读注册表 + 文件系统，不需管理员权限）。
+    - 驱动安装需管理员权限：点击「安装驱动」按钮时，后端通过 `runas` 以管理员身份重启安装进程，安装完成后自动退出，用户需手动重启应用。
+    - 模拟运行需管理员权限：启动热键触发时检查权限，无权限时拒绝并提示「需要管理员权限」。
 
 - **已授权时行为**：
-  - 首页显示"管理员权限已授予"（绿色图标）。
+  - 首页显示「管理员权限已授予」（绿色图标）。
   - 驱动安装、模拟运行均可正常执行。
 
-**实现方式**：不在 manifest 中强制 `requireAdministrator`，而是运行时检测权限状态。
+**实现方式**：不在 manifest 中强制 `requireAdministrator`，而是运行时检测权限状态并由 Rust 主动调用 `ShellExecuteW("runas")`。这样获得「拒绝 UAC 即降级」的灵活性，避免 manifest `requireAdministrator` 在拒绝时直接让应用启动失败。
 
 ### 14.2 阶段 10 落地形态
 
 - 后端模块 `src-tauri/src/admin.rs`，依赖 `windows-sys` 0.59（Win32_Foundation / Win32_Security / Win32_System_Threading / Win32_UI_Shell），仅在 `#[cfg(windows)]` 下提供真实实现。
 - `is_admin()` → `OpenProcessToken(GetCurrentProcess, TOKEN_QUERY)` + `GetTokenInformation(TokenElevation)`；任一 API 失败均视为「非管理员」并 `log::warn!`。
 - `restart_as_admin()` → `ShellExecuteW` 以 `runas` verb 拉起当前 exe 路径，失败返回错误字符串（用户取消 UAC 也算失败）。
+- **启动期 UAC 请求**（`pub fn run()` 入口）：在 `tauri::Builder` 装配前先调 `is_admin()`：
+  - 已提权 → `eprintln!("already elevated")` 后继续。
+  - 未提权 → `restart_as_admin()`：成功 → `std::process::exit(0)`；失败 → `eprintln!` 记录后降级继续。
+  - 此时 tauri-plugin-log 尚未装配，使用 `eprintln!` 走 stderr（dev 控制台可见）；setup 阶段会再调一次 `is_admin()` 通过插件正式入日志。
 - Tauri 命令：
-  - `get_admin_status() -> bool`（首页 onMounted 调用）
-  - `request_admin_restart(app: AppHandle) -> Result<(), String>`：调度成功后由后端 spawn 一个延迟 200ms 的线程调用 `app.exit(0)`，给前端留出 UI 反馈窗口，避免双开。
-- 关键点都加了 `// ADMIN_POLICY:` 标记：`admin.rs` 模块顶部、`get_admin_status` 命令、`request_admin_restart` 命令、`setup` 内权限检测处。
+  - `get_admin_status() -> bool`（首页 onMounted 调用，用于判断显示绿色「已授予」还是橙色「受限」）
+  - `request_admin_restart(app: AppHandle) -> Result<(), String>`：用户在拒绝首次 UAC 后改主意时点击「以管理员身份重启」触发；调度成功后由后端 spawn 一个延迟 200ms 的线程调用 `app.exit(0)`，给前端留出 UI 反馈窗口，避免双开。
+- 关键点都加了 `// ADMIN_POLICY:` 标记：`admin.rs` 模块顶部、`run()` 入口启动期检测、`get_admin_status` 命令、`request_admin_restart` 命令。
 
 ## 15. 前端样式设计
 
