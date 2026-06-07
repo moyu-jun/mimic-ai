@@ -11,13 +11,15 @@ mod config;
 mod driver;
 mod hotkeys;
 mod hotkeys_interception;
+mod keyboard_worker;
 mod state;
 
 use config::AppConfig;
 use hotkeys::HotkeyUpdateResult;
+use keyboard_worker::ActionEvent;
 use state::{AppState, RuntimeStatus, SendInterception, SharedState};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use tauri::{Emitter, Manager};
 use tauri_plugin_log::{Target, TargetKind};
 
@@ -376,6 +378,9 @@ pub fn run() {
                 Arc::new(Mutex::new(None))
             };
 
+            // 创建按键模拟 channel — DESIGN 8.4 / 阶段 13
+            let (action_tx, action_rx) = mpsc::channel::<ActionEvent>();
+
             // 启动 Interception 热键监听线程 — DESIGN 8.3 / 阶段 13
             let shared_state: SharedState = Arc::new(Mutex::new(AppState {
                 config: loaded_config,
@@ -385,6 +390,7 @@ pub fn run() {
                 driver_status: driver_status.clone(),
                 stop_flag: Arc::new(AtomicBool::new(false)),
                 interception_context: interception_ctx.clone(),
+                action_tx: action_tx.clone(),
             }));
 
             if matches!(&driver_status, state::DriverStatus::Ready) {
@@ -397,8 +403,19 @@ pub fn run() {
                 } else {
                     log::info!("[setup] Interception hotkey listener started");
                 }
+
+                // 启动按键模拟 worker 线程 — DESIGN 8.4 / 阶段 13
+                if let Err(e) = keyboard_worker::start_keyboard_worker(
+                    action_rx,
+                    shared_state.clone(),
+                    interception_ctx.clone(),
+                ) {
+                    log::error!("[setup] keyboard worker failed: {}", e);
+                } else {
+                    log::info!("[setup] keyboard worker started");
+                }
             } else {
-                log::warn!("[setup] Interception not ready, hotkeys disabled");
+                log::warn!("[setup] Interception not ready, hotkeys and simulation disabled");
             }
 
             app.manage(shared_state);

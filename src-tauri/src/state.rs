@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use crate::config::AppConfig;
@@ -73,6 +74,8 @@ pub struct AppState {
     pub stop_flag: Arc<AtomicBool>,
     /// Interception 上下文（阶段 13 Interception 热键）— DESIGN 8.3
     pub interception_context: Arc<Mutex<Option<SendInterception>>>,
+    /// 按键模拟事件发送器（阶段 13）— DESIGN 8.4
+    pub action_tx: Sender<crate::keyboard_worker::ActionEvent>,
 }
 
 /// 共享状态类型（Arc + Mutex 包装）

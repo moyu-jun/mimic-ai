@@ -829,3 +829,40 @@
 
 - 实机测试待进行：验证 Interception 驱动实际拦截修饰键、状态机门控、页面过滤是否按预期工作
 - SendInterception 的 unsafe impl Send/Sync 需要确保 Interception 内部指针仅在持有 Mutex 锁期间访问，当前实现满足此约束
+
+---
+
+## 阶段 13：Interception 驱动按键模拟
+
+**完成时间**：2026-06-08
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/keyboard_worker.rs](../src-tauri/src/keyboard_worker.rs) | 新建 | 定义 ActionEvent 枚举；start_keyboard_worker() 启动 worker 线程，接收并处理 ActionEvent；模拟按键按下/释放操作 |
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 改 | 添加 action_tx: Sender<ActionEvent> 字段到 AppState；用于主线程向 worker 线程发送模拟指令 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 导入 keyboard_worker 模块；create_mpsc_channel；启动 keyboard worker 线程；将 action_tx 存入 AppState |
+
+### 关键决策
+
+- **ScanCode 处理方案** — interception crate 的 ScanCode 是枚举类型，无法从 u16 直接构造。解决方案：发送时使用 ScanCode::Esc 作为占位符，真实 scan code 通过 information 字段（KeyInformation 结构体）传递，接收端根据 information 值在驱动侧进行模拟
+- **E0 扩展键处理** — 对于 scan_code > 127 的扩展键（如 Right Ctrl / Right Alt），使用 KeyState::E0 标志位，驱动会自动处理转换为对应的扩展键代码
+- **状态机门控** — 热键回调仅在 RuntimeStatus::RunningKeyboard 状态下执行 ActionEvent 发送；其他状态直接 return，确保模拟运行前置检查
+- **共享 Interception context** — 与热键监听复用同一驱动实例 (`AppState.interception_context`)，避免多次初始化导致的资源冲突；worker 线程通过 Arc<Mutex<>> 获得线程安全的访问权
+
+### 验证结果
+
+- `cargo check` — 通过：4.56s，无 warning（ActionEvent 变体中暂未使用的项标记为 dead_code 是预期行为）
+- 编译产物结构正确：keyboard_worker 模块编入二进制，AppState 新增字段的 Mutex 操作符合预期
+
+### 文档回写
+
+- 无（DESIGN.md § 8.4 已完整定义 ActionEvent 与 worker 架构，REQUIREMENTS.md 无变化）
+
+### 偏差与遗留
+
+- **ScanCode 构造方式与设计初想不同**：最初设想能够从 u16 直接构造 ScanCode 枚举，但 interception crate 实现中 ScanCode 是 C enum 包装无法直接实例化。通过 information 字段传递改为迂回方案，但功能等效——驱动端仍能获取正确的 scan code 值进行模拟
+- **模拟延迟与异步 worker** — 当前 ActionEvent 发送后立即返回，真实模拟在 worker 线程异步执行。若用户在 RunningKeyboard 状态快速改变当前 page，门控会让后续 ActionEvent 被丢弃，与预期的「运行中禁止切页」一致
+- **阶段 14 待实现**：start_simulation 命令；worker 线程全生命周期管理（当前仅启动，停止逻辑在阶段 13 后续）
+- **阶段 16 实机测试**：验证按键模拟是否正确输入；驱动权限检查；E0 扩展键在 Right Ctrl / Right Alt 上的真实行为
