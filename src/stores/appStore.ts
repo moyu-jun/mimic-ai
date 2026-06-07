@@ -6,6 +6,7 @@
  */
 
 import { reactive } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import type { AppPage, RuntimeStatus, KeyboardAction, MouseAction, HotkeyConfig } from '../types/config'
 
 export const appStore = reactive({
@@ -49,7 +50,10 @@ export const appStore = reactive({
   } as HotkeyConfig,
 })
 
-/** 切换当前页面（后续阶段会在此处追加 set_current_page 后端调用） */
+/** 切换当前页面（阶段 12：调用后端 set_current_page） */
 export function setPage(page: AppPage): void {
   appStore.currentPage = page
+  invoke('set_current_page', { page }).catch((err) => {
+    console.error('Failed to set current page:', err)
+  })
 }

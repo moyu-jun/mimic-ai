@@ -7,10 +7,11 @@
  *   - 仅覆盖菜单 + 内容区，不覆盖标题栏与状态栏。
  *   - 半透明灰色，pointer-events 拦截点击。
  *   - 内部无任何文字 / 图标 / 按钮，运行文案由状态栏承载。
- *   - 由 appStore.isLocked 控制；阶段 12 起改由 runtime_status_changed 事件驱动。
+ *   - 阶段 12：由 runtime_status_changed 事件驱动 isLocked 状态。
  */
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { appStore } from './stores/appStore'
 import AppTitleBar from './components/AppTitleBar.vue'
 import AppSidebar from './components/AppSidebar.vue'
@@ -19,7 +20,7 @@ import HomePage from './pages/HomePage.vue'
 import KeyboardPage from './pages/KeyboardPage.vue'
 import MousePage from './pages/MousePage.vue'
 import SettingsPage from './pages/SettingsPage.vue'
-import type { AppPage } from './types/config'
+import type { AppPage, RuntimeStatus } from './types/config'
 
 const PAGE_COMPONENTS = {
   home: HomePage,
@@ -29,6 +30,8 @@ const PAGE_COMPONENTS = {
 } satisfies Record<AppPage, unknown>
 
 const currentPageComponent = computed(() => PAGE_COMPONENTS[appStore.currentPage])
+
+let unlisten: UnlistenFn | null = null
 
 // 阶段 8: 启动时加载配置(当前从后端内存默认配置加载)
 onMounted(async () => {
@@ -47,6 +50,17 @@ onMounted(async () => {
     console.error('Failed to load config:', error)
     // 加载失败时保持前端 mock 数据, 应用仍可运行
   }
+
+  // 阶段 12：监听 runtime_status_changed 事件
+  unlisten = await listen<{ status: RuntimeStatus }>('runtime_status_changed', (event) => {
+    appStore.runtimeStatus = event.payload.status
+    // Running* 或 PickingMouse 时上锁, 否则解锁
+    appStore.isLocked = ['RunningKeyboard', 'RunningMouse', 'PickingMouse'].includes(event.payload.status)
+  })
+})
+
+onUnmounted(() => {
+  if (unlisten) unlisten()
 })
 </script>
 
@@ -58,7 +72,7 @@ onMounted(async () => {
       <main class="content">
         <component :is="currentPageComponent" />
       </main>
-      <!-- 运行期锁定蒙版：阶段 7 mock 切换，阶段 12 起由后端事件驱动 -->
+      <!-- 运行期锁定蒙版：阶段 12 由 runtime_status_changed 事件驱动 -->
       <div
         v-if="appStore.isLocked"
         class="lock-overlay"

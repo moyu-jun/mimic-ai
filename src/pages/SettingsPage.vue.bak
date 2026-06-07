@@ -2,13 +2,13 @@
 /**
  * 设置页 — 需求 3.3.4 / DESIGN 15.6
  * 复用 KeyCaptureInput 渲染启动 / 停止热键；保存按钮对比快照，有变化才提示。
- * 阶段 12：保存时调用 update_hotkeys 注册 + 持久化。
+ * 阶段 9：保存时调用 save_config 持久化到 INI 文件。
  */
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { appStore } from '../stores/appStore'
 import KeyCaptureInput from '../components/KeyCaptureInput.vue'
-import type { CapturedKey, HotkeyConfig, HotkeyUpdateResult } from '../types/config'
+import type { CapturedKey, HotkeyConfig, AppConfig } from '../types/config'
 
 /** 已持久化快照（用于保存时对比是否真的变更） */
 const persistedSnapshot = ref<HotkeyConfig>(cloneHotkeys(appStore.hotkeys))
@@ -17,10 +17,8 @@ const persistedSnapshot = ref<HotkeyConfig>(cloneHotkeys(appStore.hotkeys))
 const startKey = ref<CapturedKey | null>(cloneKey(appStore.hotkeys.start))
 const stopKey = ref<CapturedKey | null>(cloneKey(appStore.hotkeys.stop))
 
-/** 保存提示文本：null 表示不显示；保存后短暂显示，失败/无变化时不显示 */
+/** 保存提示文本（mock）：null 表示不显示；保存后短暂显示，失败/无变化时不显示 */
 const saveMessage = ref<string | null>(null)
-/** 提示文本是否为警告（橙色） */
-const isWarning = ref(false)
 let messageTimer: number | null = null
 
 const isDirty = computed(() => {
@@ -41,15 +39,13 @@ function cloneHotkeys(h: HotkeyConfig): HotkeyConfig {
   return { start: cloneKey(h.start), stop: cloneKey(h.stop) }
 }
 
-function showMessage(text: string, warning: boolean = false): void {
+function showMessage(text: string): void {
   saveMessage.value = text
-  isWarning.value = warning
   if (messageTimer !== null) {
     window.clearTimeout(messageTimer)
   }
   messageTimer = window.setTimeout(() => {
     saveMessage.value = null
-    isWarning.value = false
     messageTimer = null
   }, 2000)
 }
@@ -62,41 +58,28 @@ async function onSave(): Promise<void> {
   }
 
   try {
-    // 阶段 12：调用 update_hotkeys 注册 + 持久化
-    const result = await invoke<HotkeyUpdateResult>('update_hotkeys', {
+    // 阶段 9：构造完整配置对象并调用 save_config 持久化
+    const updatedConfig: AppConfig = {
+      keyboardActions: appStore.keyboardActions,
+      mouseActions: appStore.mouseActions,
       hotkeys: {
         start: cloneKey(startKey.value),
         stop: cloneKey(stopKey.value),
       },
-    })
-
-    // 无变化：不提示
-    if (!result.changed) return
-
-    // 注册失败
-    if (!result.registered) {
-      const msg = result.message || '热键注册失败'
-      showMessage(msg, msg.includes('冲突'))
-      return
     }
 
-    // 持久化失败
-    if (!result.persisted) {
-      showMessage('持久化失败', false)
-      return
-    }
+    // 调用后端持久化命令
+    await invoke('save_config', { config: updatedConfig })
 
-    // 注册 + 持久化都成功
-    appStore.hotkeys = {
-      start: cloneKey(startKey.value),
-      stop: cloneKey(stopKey.value),
-    }
+    // 持久化成功后更新 store 和快照
+    appStore.hotkeys = updatedConfig.hotkeys
     persistedSnapshot.value = cloneHotkeys(appStore.hotkeys)
-    showMessage('已保存', false)
+    showMessage('已保存')
   } catch (err) {
+    // 持久化失败时显示详细错误提示
     const errorMsg = err instanceof Error ? err.message : String(err)
-    showMessage(`保存失败: ${errorMsg}`, false)
-    console.error('Failed to update hotkeys:', err)
+    showMessage(`保存失败: ${errorMsg}`)
+    console.error('Failed to save config:', err)
   }
 }
 
@@ -132,7 +115,7 @@ onBeforeUnmount(() => {
     </div>
 
     <footer class="form-footer">
-      <span v-if="saveMessage" class="save-msg" :class="{ 'msg-warning': isWarning }">{{ saveMessage }}</span>
+      <span v-if="saveMessage" class="save-msg">{{ saveMessage }}</span>
       <button
         type="button"
         class="save-btn"
@@ -216,10 +199,6 @@ onBeforeUnmount(() => {
   color: var(--success);
   letter-spacing: 0.3px;
   animation: fade-in var(--transition-normal) var(--ease-default);
-}
-
-.save-msg.msg-warning {
-  color: var(--warning);
 }
 
 @keyframes fade-in {

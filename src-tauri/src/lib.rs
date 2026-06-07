@@ -9,13 +9,15 @@
 mod admin;
 mod config;
 mod driver;
+mod hotkeys;
 mod state;
 
 use config::AppConfig;
+use hotkeys::HotkeyUpdateResult;
 use state::{AppState, RuntimeStatus, SharedState};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_log::{Target, TargetKind};
 
 /// 加载配置命令 — 返回内存中的当前配置
@@ -27,11 +29,26 @@ fn load_config(state: tauri::State<SharedState>) -> Result<AppConfig, String> {
     Ok(app_state.config.clone())
 }
 
-/// 保存配置命令 — 先落盘成功，再更新内存
+/// 保存配置命令 — 先落盘成功,再更新内存
 ///
-/// TODO(阶段 12): 在此处添加运行态守卫 — DESIGN 6.1
+/// 阶段 12: 增加运行态守卫 — DESIGN 6.1
 #[tauri::command]
 fn save_config(config: AppConfig, state: tauri::State<SharedState>) -> Result<(), String> {
+    // 运行态守卫 — DESIGN 6.1
+    {
+        let app_state = state
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard
+            | RuntimeStatus::RunningMouse
+            | RuntimeStatus::PickingMouse => {
+                return Err("busy: simulation running".to_string());
+            }
+            _ => {}
+        }
+    }
+
     // 先持久化，失败时内存状态不变
     config::save(&config).map_err(|e| {
         log::error!("[save_config] persist failed: {}", e);
@@ -125,6 +142,104 @@ fn reboot_system() -> Result<(), String> {
     driver::reboot_system()
 }
 
+/// 设置当前页面 — 阶段 12
+///
+/// 后端记录当前页面，用于判断热键是否可触发（REQUIREMENTS 3.6）。
+#[tauri::command]
+fn set_current_page(page: String, state: tauri::State<SharedState>) -> Result<(), String> {
+    // 运行态守卫 — DESIGN 6.1
+    {
+        let app_state = state
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard
+            | RuntimeStatus::RunningMouse
+            | RuntimeStatus::PickingMouse => {
+                return Err("busy: simulation running".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    let mut app_state = state
+        .lock()
+        .map_err(|e| format!("Failed to lock state: {}", e))?;
+    app_state.current_page = page.clone();
+    log::info!("[set_current_page] page changed to: {}", page);
+    Ok(())
+}
+
+/// 更新热键配置 — 阶段 12 / DESIGN 6.2
+///
+/// 流程：对比变化 → 注销旧热键 → 注册新热键 → 持久化。
+/// 返回结构化结果供前端分别提示注册成功/失败与持久化成功/失败。
+#[tauri::command]
+fn update_hotkeys(
+    hotkeys: config::HotkeyConfig,
+    app: tauri::AppHandle,
+    state: tauri::State<SharedState>,
+) -> Result<HotkeyUpdateResult, String> {
+    // 运行态守卫 — DESIGN 6.1
+    {
+        let app_state = state
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard
+            | RuntimeStatus::RunningMouse
+            | RuntimeStatus::PickingMouse => {
+                return Err("busy: simulation running".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    hotkeys::update_hotkeys(&app, &state, hotkeys)
+}
+
+/// 停止模拟 — 阶段 12（仅切换状态）
+///
+/// 当前阶段仅将状态从 Running* 切回 Idle,不涉及真实 worker 停止（阶段 13 接入）。
+#[tauri::command]
+fn stop_simulation(state: tauri::State<SharedState>, app: tauri::AppHandle) -> Result<(), String> {
+    let new_status = {
+        let mut app_state = state
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard | RuntimeStatus::RunningMouse => {
+                app_state.runtime_status = RuntimeStatus::Idle;
+                RuntimeStatus::Idle
+            }
+            _ => {
+                return Err("Not running".to_string());
+            }
+        }
+    };
+
+    // 发送 runtime_status_changed 事件
+    if let Err(e) = app.emit(
+        "runtime_status_changed",
+        serde_json::json!({ "status": new_status }),
+    ) {
+        log::error!("[stop_simulation] failed to emit event: {}", e);
+    }
+
+    log::info!("[stop_simulation] simulation stopped");
+    Ok(())
+}
+
+/// 获取当前运行状态 — 阶段 12
+#[tauri::command]
+fn get_runtime_status(state: tauri::State<SharedState>) -> Result<RuntimeStatus, String> {
+    let app_state = state
+        .lock()
+        .map_err(|e| format!("Failed to lock state: {}", e))?;
+    Ok(app_state.runtime_status.clone())
+}
+
 /// 以管理员身份重启自身 — DESIGN 14.1 / 阶段 10
 ///
 /// 触发 UAC 提示；用户取消或 ShellExecuteW 失败时返回 Err 字符串。
@@ -197,9 +312,13 @@ pub fn run() {
                 ])
                 .build(),
         )
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            log::info!("[setup] Mimic starting, version {}", env!("CARGO_PKG_VERSION"));
+            log::info!(
+                "[setup] Mimic starting, version {}",
+                env!("CARGO_PKG_VERSION")
+            );
 
             // 配置加载（路径 + 结果均记录日志）
             match config::config_path() {
@@ -208,7 +327,10 @@ pub fn run() {
             }
             let (loaded_config, config_warning) = config::load_or_init_graceful();
             if let Some(w) = &config_warning {
-                log::error!("[setup] config write failed, falling back to in-memory default: {}", w);
+                log::error!(
+                    "[setup] config write failed, falling back to in-memory default: {}",
+                    w
+                );
             } else {
                 log::info!(
                     "[setup] config loaded: {} keyboard / {} mouse actions, hotkeys {} / {}",
@@ -222,11 +344,26 @@ pub fn run() {
             // 权限检测仅记录日志,不阻断启动 — DESIGN 14.1 降级启动
             // ADMIN_POLICY: Detect at startup, render result on home page, never block launch.
             let admin = admin::is_admin();
-            log::info!("[setup] admin status: {}", if admin { "elevated" } else { "limited" });
+            log::info!(
+                "[setup] admin status: {}",
+                if admin { "elevated" } else { "limited" }
+            );
 
             // 驱动检测 — DESIGN 13.1 步骤 3 / 阶段 11
             let driver_status = driver::check_interception_driver();
             log::info!("[setup] driver status: {:?}", driver_status);
+
+            // 热键注册 — DESIGN 13.1 步骤 4 / 阶段 12
+            if let Err(e) = hotkeys::register_hotkeys(app.handle(), &loaded_config.hotkeys) {
+                log::error!("[setup] hotkey registration failed: {}", e);
+                // 发送 hotkey_registration_failed 事件
+                let _ = app.emit(
+                    "hotkey_registration_failed",
+                    serde_json::json!({ "error": e }),
+                );
+            } else {
+                log::info!("[setup] hotkeys registered");
+            }
 
             let initial_state = AppState {
                 config: loaded_config,
@@ -252,6 +389,10 @@ pub fn run() {
             check_driver_status,
             install_interception_driver,
             reboot_system,
+            set_current_page,
+            update_hotkeys,
+            stop_simulation,
+            get_runtime_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

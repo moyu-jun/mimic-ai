@@ -61,3 +61,11 @@ export interface AppConfig {
   mouseActions: MouseAction[]
   hotkeys: HotkeyConfig
 }
+
+/** 热键更新结果（DESIGN 6.2 / 阶段 12） */
+export interface HotkeyUpdateResult {
+  changed: boolean
+  registered: boolean
+  persisted: boolean
+  message: string | null
+}

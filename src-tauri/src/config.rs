@@ -156,7 +156,10 @@ pub fn load_or_init() -> Result<AppConfig, String> {
         Ok(config) => Ok(config),
         Err(e) => {
             // 解析失败，用默认配置覆盖
-            log::error!("[config] failed to parse INI, overwriting with default: {}", e);
+            log::error!(
+                "[config] failed to parse INI, overwriting with default: {}",
+                e
+            );
             let default = default_config();
             save(&default)?;
             Ok(default)
@@ -166,23 +169,27 @@ pub fn load_or_init() -> Result<AppConfig, String> {
 
 /// 从 INI 文件加载配置 — 阶段 9 内部辅助函数
 fn load_from_ini(path: &PathBuf) -> Result<AppConfig, String> {
-    let ini = Ini::load_from_file(path)
-        .map_err(|e| format!("Failed to load INI file: {}", e))?;
+    let ini = Ini::load_from_file(path).map_err(|e| format!("Failed to load INI file: {}", e))?;
 
     // 解析 [hotkeys] section
-    let hotkeys_section = ini.section(Some("hotkeys"))
+    let hotkeys_section = ini
+        .section(Some("hotkeys"))
         .ok_or_else(|| "Missing [hotkeys] section".to_string())?;
 
-    let start_label = hotkeys_section.get("start_label")
+    let start_label = hotkeys_section
+        .get("start_label")
         .ok_or_else(|| "Missing start_label".to_string())?;
-    let start_scan_code: u16 = hotkeys_section.get("start_scan_code")
+    let start_scan_code: u16 = hotkeys_section
+        .get("start_scan_code")
         .ok_or_else(|| "Missing start_scan_code".to_string())?
         .parse()
         .map_err(|e| format!("Invalid start_scan_code: {}", e))?;
 
-    let stop_label = hotkeys_section.get("stop_label")
+    let stop_label = hotkeys_section
+        .get("stop_label")
         .ok_or_else(|| "Missing stop_label".to_string())?;
-    let stop_scan_code: u16 = hotkeys_section.get("stop_scan_code")
+    let stop_scan_code: u16 = hotkeys_section
+        .get("stop_scan_code")
         .ok_or_else(|| "Missing stop_scan_code".to_string())?
         .parse()
         .map_err(|e| format!("Invalid stop_scan_code: {}", e))?;
@@ -199,17 +206,21 @@ fn load_from_ini(path: &PathBuf) -> Result<AppConfig, String> {
     };
 
     // 解析 [keyboard] section
-    let keyboard_section = ini.section(Some("keyboard"))
+    let keyboard_section = ini
+        .section(Some("keyboard"))
         .ok_or_else(|| "Missing [keyboard] section".to_string())?;
-    let keyboard_actions_json = keyboard_section.get("actions")
+    let keyboard_actions_json = keyboard_section
+        .get("actions")
         .ok_or_else(|| "Missing keyboard actions".to_string())?;
     let keyboard_actions: Vec<KeyboardAction> = serde_json::from_str(keyboard_actions_json)
         .map_err(|e| format!("Failed to parse keyboard actions: {}", e))?;
 
     // 解析 [mouse] section
-    let mouse_section = ini.section(Some("mouse"))
+    let mouse_section = ini
+        .section(Some("mouse"))
         .ok_or_else(|| "Missing [mouse] section".to_string())?;
-    let mouse_actions_json = mouse_section.get("actions")
+    let mouse_actions_json = mouse_section
+        .get("actions")
         .ok_or_else(|| "Missing mouse actions".to_string())?;
     let mouse_actions: Vec<MouseAction> = serde_json::from_str(mouse_actions_json)
         .map_err(|e| format!("Failed to parse mouse actions: {}", e))?;
@@ -231,7 +242,10 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     // 写入 [hotkeys] section
     ini.with_section(Some("hotkeys"))
         .set("start_label", &config.hotkeys.start.key_label)
-        .set("start_scan_code", config.hotkeys.start.scan_code.to_string())
+        .set(
+            "start_scan_code",
+            config.hotkeys.start.scan_code.to_string(),
+        )
         .set("stop_label", &config.hotkeys.stop.key_label)
         .set("stop_scan_code", config.hotkeys.stop.scan_code.to_string());
 
@@ -244,8 +258,7 @@ pub fn save(config: &AppConfig) -> Result<(), String> {
     // 写入 [mouse] section
     let mouse_json = serde_json::to_string(&config.mouse_actions)
         .map_err(|e| format!("Failed to serialize mouse actions: {}", e))?;
-    ini.with_section(Some("mouse"))
-        .set("actions", mouse_json);
+    ini.with_section(Some("mouse")).set("actions", mouse_json);
 
     // 写入文件
     ini.write_to_file(&path)

@@ -3,8 +3,9 @@
  * 按键模拟页 — 需求 3.3.2 / DESIGN 15.6
  * 列表：勾选 / 键位 / 间隔 / 删除；顶部：捕获框 + 添加按钮。
  * 阶段 4 数据全部 mock 前端，阶段 8 起接 load_config / save_config。
+ * 阶段 12：移除 onMounted/onBeforeUnmount 中的状态切换，由 set_current_page 统一管理。
  */
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onBeforeUnmount } from 'vue'
 import { appStore } from '../stores/appStore'
 import KeyCaptureInput from '../components/KeyCaptureInput.vue'
 import type { CapturedKey, KeyboardAction } from '../types/config'
@@ -104,18 +105,10 @@ function onIntervalCommit(action: KeyboardAction, e: Event): void {
   })
 }
 
-onMounted(() => {
-  // 阶段 4 mock：进入按键页时切换到 ReadyKeyboard（TASKS 任务 6）
-  appStore.runtimeStatus = 'ReadyKeyboard'
-})
-
 onBeforeUnmount(() => {
-  // 离开时回到 Idle（阶段 12 会由 set_current_page 统一管理）
-  appStore.runtimeStatus = 'Idle'
   if (duplicateTimer !== null) window.clearTimeout(duplicateTimer)
 })
 </script>
-
 <template>
   <section class="keyboard-page">
     <header class="top-bar">

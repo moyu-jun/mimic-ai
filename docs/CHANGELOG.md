@@ -652,3 +652,54 @@
 
 
 
+---
+
+## 阶段 12：全局热键注册 + 状态机门控
+
+**完成时间**：2026-06-07
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/hotkeys.rs](../src-tauri/src/hotkeys.rs) | 新建 | 热键注册/注销/回调、状态机门控、冲突校验、scanCode→Code 映射 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 导入 hotkeys 模块；注册 set_current_page / update_hotkeys / stop_simulation / get_runtime_status 命令；setup 阶段接入热键注册(步骤4)；运行态命令守卫；装配 tauri-plugin-global-shortcut |
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | 新增 tauri-plugin-global-shortcut = "2" 依赖 |
+| [src-tauri/capabilities/default.json](../src-tauri/capabilities/default.json) | 改 | 追加 global-shortcut:default 权限 |
+| [src/types/config.ts](../src/types/config.ts) | 改 | 新增 HotkeyUpdateResult 接口 |
+| [src/pages/SettingsPage.vue](../src/pages/SettingsPage.vue) | 改 | 调用 update_hotkeys 命令；根据 HotkeyUpdateResult 显示反馈；处理冲突错误 |
+| [src/App.vue](../src/App.vue) | 改 | 监听 runtime_status_changed 事件驱动蒙版与状态同步 |
+| [src/stores/appStore.ts](../src/stores/appStore.ts) | 改 | setPage() 调用 set_current_page 命令 |
+| [src/pages/KeyboardPage.vue](../src/pages/KeyboardPage.vue) | 改 | 移除 onMounted/onBeforeUnmount 中的 mock 状态切换代码 |
+| [src/pages/MousePage.vue](../src/pages/MousePage.vue) | 改 | 移除 onMounted/onBeforeUnmount 中的 mock 状态切换代码 |
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 改 | 移除阶段 7 的临时 mock 切换按钮 |
+
+### 关键决策
+
+- **使用 global-hotkey crate 的 Code 枚举**：tauri-plugin-global-shortcut 内部使用 Code 枚举而非字符串加速器，实现了 scan_code_to_code() 映射函数支持字母/数字/F键/功能键。
+- **状态机门控在热键回调内实现**：handle_start_hotkey / handle_stop_hotkey 检查 current_page + runtime_status，状态不匹配直接 return。
+- **热键冲突校验**：update_hotkeys 命令检查热键 scanCode 是否与 keyboard_actions 中任意项冲突，冲突时返回 registered: false。
+- **运行态命令守卫**：save_config / update_hotkeys / set_current_page / install_driver 在 Running* / PickingMouse 时返回 Err("busy")。
+- **阶段 12 不实际模拟**：热键回调仅切换 runtime_status 并发送 runtime_status_changed 事件，真实模拟留待阶段 13。
+- **双代理协作**：rust-reviewer 实现后端，typescript-reviewer 实现前端，确保类型安全与接口一致性。
+- **事件驱动蒙版**：App.vue 监听 runtime_status_changed 事件，根据状态自动控制 isLocked，替代阶段 4-7 的手动切换。
+
+### 验证结果
+
+- `cargo check` — 通过：3.03s，无 warning。
+- `npm run build` — 通过：52 模块，CSS 18.0 kB / JS 98.2 kB (gzip 35.5 kB)，无 TS 错误。
+- 五条验收清单（热键触发状态切换、页面过滤、设置页保存、冲突校验、事件驱动蒙版）需实机验证，推至阶段 16。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 12 状态「待开始」→「✅ 已完成」；五条验收点标记为「依赖实机交互，与阶段 16 一并复核」。
+- REQUIREMENTS / DESIGN — 无改动（实现严格遵循 DESIGN 6/8/9/13 与 REQUIREMENTS 3.6）。
+
+### 偏差与遗留
+
+- **五条验收点未实机验证**：热键触发、页面过滤、设置页保存反馈、冲突校验提示、最小化/失焦后热键仍触发均需 Windows 实机，推至阶段 16。
+- **scanCode 映射覆盖范围**：当前支持 A-Z / 0-9 / F1-F12 / Space / Tab / Esc / Shift/Ctrl/Alt，与前端 keyMap.ts 一致；扩展键位需同步更新前后端映射。
+- **运行态守卫未在阶段 12 验证**：守卫逻辑已实现，但阶段 12 不运行真实模拟，"busy" 错误返回在阶段 13 真实触发时验证。
+
+
+

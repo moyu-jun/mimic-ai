@@ -6,11 +6,9 @@
  *         点击触发 request_admin_restart（UAC 提示 + 自身退出）。
  *   - 驱动状态：阶段 11 接 check_driver_status / install_driver
  *   - 热键概览：由 load_config 提供（阶段 8 已接入）
- *
- * 阶段 7：临时增加「模拟运行（mock）」切换按钮，用于验证锁定蒙版视觉。
- *   - 阶段 12 真热键接入后整体移除该按钮（但保留 App.vue 内的 lock-overlay 逻辑）。
+ * 阶段 12：移除「模拟运行（mock）」临时切换按钮。
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { appStore } from '../stores/appStore'
 import type { DriverStatus } from '../types/config'
@@ -90,19 +88,6 @@ async function onReboot(): Promise<void> {
       ? '权限不足，请点击上方「以管理员身份重启」按钮'
       : '重启失败，请手动重启电脑'
     log_error('[HomePage] reboot failed:', err)
-  }
-}
-
-// === 阶段 7 mock：模拟运行切换 ===
-const isMockRunning = computed(() => appStore.runtimeStatus === 'RunningKeyboard')
-
-function toggleMockRun(): void {
-  if (isMockRunning.value) {
-    appStore.runtimeStatus = 'Idle'
-    appStore.isLocked = false
-  } else {
-    appStore.runtimeStatus = 'RunningKeyboard'
-    appStore.isLocked = true
   }
 }
 
@@ -207,16 +192,6 @@ onMounted(async () => {
     <p v-if="configWarning" class="config-warning">
       ⚠ 配置文件无法写入，本次使用默认配置运行，修改不会保存。
     </p>
-
-    <!-- 阶段 7 临时按钮：mock 切换 RunningKeyboard，验证锁定蒙版（阶段 12 移除） -->
-    <button
-      type="button"
-      class="mock-run-btn"
-      :class="{ running: isMockRunning }"
-      @click="toggleMockRun"
-    >
-      {{ isMockRunning ? '停止模拟（mock）' : '模拟运行（mock）' }}
-    </button>
   </section>
 </template>
 
@@ -441,44 +416,6 @@ onMounted(async () => {
 .hotkey-value .sep {
   margin: 0 6px;
   color: var(--text-disabled);
-}
-
-/**
- * 阶段 7 临时按钮 — 锁定后仍需可点击切回 Idle，
- * 因此用 position:fixed 浮在蒙版之上（z-index > .lock-overlay 的 10）。
- * 阶段 12 真热键接入后整体移除。
- */
-.mock-run-btn {
-  position: fixed;
-  right: 16px;
-  bottom: calc(var(--statusbar-height) + 12px);
-  z-index: 50;
-  padding: 6px 14px;
-  border-radius: 6px;
-  background: var(--accent);
-  color: var(--color-paper-white);
-  font-size: 12px;
-  font-weight: 500;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-  transition:
-    background var(--transition-fast) var(--ease-default),
-    transform var(--transition-fast) var(--ease-default);
-}
-
-.mock-run-btn:hover {
-  background: var(--accent-hover);
-}
-
-.mock-run-btn:active {
-  transform: translateY(1px);
-}
-
-.mock-run-btn.running {
-  background: var(--danger);
-}
-
-.mock-run-btn.running:hover {
-  background: color-mix(in srgb, var(--danger) 85%, white);
 }
 
 /* 配置写盘失败警告 — 正常情况不可见 */

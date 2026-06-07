@@ -65,10 +65,7 @@ mod windows_impl {
         let exe_path = std::env::current_exe()
             .map_err(|e| format!("Failed to get current exe path: {}", e))?;
 
-        let exe_wide: Vec<u16> = OsStr::new(&exe_path)
-            .encode_wide()
-            .chain(once(0))
-            .collect();
+        let exe_wide: Vec<u16> = OsStr::new(&exe_path).encode_wide().chain(once(0)).collect();
         let verb_wide: Vec<u16> = OsStr::new("runas").encode_wide().chain(once(0)).collect();
 
         // ShellExecuteW 返回 HINSTANCE，按惯例 > 32 表示成功

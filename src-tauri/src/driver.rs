@@ -74,15 +74,8 @@ fn check_driver_windows() -> DriverStatus {
 
     for path in service_paths {
         let mut hkey = std::ptr::null_mut();
-        let status = unsafe {
-            RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                path.as_ptr(),
-                0,
-                KEY_READ,
-                &mut hkey,
-            )
-        };
+        let status =
+            unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut hkey) };
         if status == 0 {
             // 打开成功 → 服务项存在
             unsafe { RegCloseKey(hkey) };
@@ -102,9 +95,7 @@ fn check_driver_windows() -> DriverStatus {
 #[cfg(windows)]
 fn install_driver_windows() -> Result<(), String> {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{
-        WaitForSingleObject, INFINITE,
-    };
+    use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
     use windows_sys::Win32::UI::Shell::{
         ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
     };
@@ -142,7 +133,7 @@ fn install_driver_windows() -> Result<(), String> {
     sei.lpVerb = verb.as_ptr();
     sei.lpFile = file.as_ptr();
     sei.lpParameters = params.as_ptr();
-    sei.nShow = SW_HIDE as i32;
+    sei.nShow = SW_HIDE;
 
     let ok = unsafe { ShellExecuteExW(&mut sei) };
     if ok == 0 {
@@ -176,8 +167,8 @@ fn install_driver_windows() -> Result<(), String> {
 /// 触发系统重启 — Windows 实现，调用 `shutdown /r /t 0`
 #[cfg(windows)]
 fn reboot_system_windows() -> Result<(), String> {
-    use std::process::Command;
     use std::os::windows::process::CommandExt;
+    use std::process::Command;
 
     // CREATE_NO_WINDOW (0x08000000) 避免弹出黑色控制台窗口
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
