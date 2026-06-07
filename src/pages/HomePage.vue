@@ -1,26 +1,26 @@
 <script setup lang="ts">
 /**
  * 首页 — 状态仪表盘（DESIGN 15.4 / 需求 3.3.1）
- * 阶段 3：数据全部为前端 mock，不绑定后端。
+ * 阶段 9：onMounted 调用 get_init_warning，有写盘失败时显示小字提示。
  *   - 管理员权限：阶段 10 接 get_admin_status
  *   - 驱动状态：阶段 11 接 check_driver_status / install_driver
- *   - 热键概览：阶段 8 起由 load_config 提供
+ *   - 热键概览：由 load_config 提供（阶段 8 已接入）
  *
  * 阶段 7：临时增加「模拟运行（mock）」切换按钮，用于验证锁定蒙版视觉。
- *   - 点击在 Idle ↔ RunningKeyboard 间切换 runtimeStatus + isLocked。
- *   - 按钮使用 position:fixed + 高 z-index，确保锁定后仍能点击切回（否则验证流程无法闭环）。
  *   - 阶段 12 真热键接入后整体移除该按钮（但保留 App.vue 内的 lock-overlay 逻辑）。
  */
-import { computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { appStore } from '../stores/appStore'
 
 const APP_VERSION = '0.1.0'
 const APP_TAGLINE = 'Windows 按键与鼠标模拟工具'
 
+// 启动时配置写盘失败的警告（极小概率，默认为空）
+const configWarning = ref<string | null>(null)
+
 // === mock 数据（后续阶段替换为真实命令）===
 const isAdmin = true
-const startHotkey = 'F12'
-const stopHotkey = 'F12'
 
 function onInstallDriver(): void {
   // 阶段 11 接 install_driver；当前为占位，点击无副作用。
@@ -39,6 +39,14 @@ function toggleMockRun(): void {
     appStore.isLocked = true
   }
 }
+
+onMounted(async () => {
+  try {
+    configWarning.value = await invoke<string | null>('get_init_warning')
+  } catch {
+    // 命令本身失败不处理，警告不显示即可
+  }
+})
 </script>
 
 <template>
@@ -78,11 +86,16 @@ function toggleMockRun(): void {
     <div class="card hotkey-card">
       <span class="hotkey-label">当前热键</span>
       <span class="hotkey-value">
-        启动：<b>{{ startHotkey }}</b>
+        启动：<b>{{ appStore.hotkeys.start.keyLabel }}</b>
         <span class="sep">|</span>
-        停止：<b>{{ stopHotkey }}</b>
+        停止：<b>{{ appStore.hotkeys.stop.keyLabel }}</b>
       </span>
     </div>
+
+    <!-- 配置写盘失败警告（极小概率，默认不显示） -->
+    <p v-if="configWarning" class="config-warning">
+      ⚠ 配置文件无法写入，本次使用默认配置运行，修改不会保存。
+    </p>
 
     <!-- 阶段 7 临时按钮：mock 切换 RunningKeyboard，验证锁定蒙版（阶段 12 移除） -->
     <button
@@ -287,5 +300,13 @@ function toggleMockRun(): void {
 
 .mock-run-btn.running:hover {
   background: color-mix(in srgb, var(--danger) 85%, white);
+}
+
+/* 配置写盘失败警告 — 正常情况不可见 */
+.config-warning {
+  margin: 0;
+  font-size: 11px;
+  color: var(--warning);
+  opacity: 0.85;
 }
 </style>

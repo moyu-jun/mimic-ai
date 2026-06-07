@@ -46,13 +46,15 @@ pub enum DriverStatus {
 
 /// 应用全局状态 — DESIGN 9.2
 ///
-/// 阶段 8 仅 `config` 字段被 `load_config` 命令读取；
-/// 其余字段（`current_page` / `runtime_status` / `driver_status` / `stop_flag`）
-/// 在阶段 10-13 接入真实功能后逐步使用，当前先 allow(dead_code) 避免噪声警告。
+/// 阶段 9 增加 `config_warning`：启动时若 INI 写盘失败，此字段记录原因，
+/// 前端可通过 `get_init_warning` 命令读取并在首页展示小字提示。
+/// 其余字段在阶段 10-13 接入真实功能后逐步使用，当前先 allow(dead_code)。
 #[allow(dead_code)]
 pub struct AppState {
     /// 当前配置（从 INI 加载或默认）
     pub config: AppConfig,
+    /// 启动时配置写盘失败的原因；None 表示无问题
+    pub config_warning: Option<String>,
     /// 当前页面（用于判断热键是否可触发）
     pub current_page: String,
     /// 运行状态机

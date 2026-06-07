@@ -120,11 +120,27 @@ pub fn config_path() -> Result<PathBuf, String> {
     Ok(exe_dir.join("mimic.ini"))
 }
 
+/// 优雅初始化配置 — 写盘失败也不 panic，返回 (配置, 可选警告)
+///
+/// 任何 IO 错误均降级为内存默认配置，应用仍可正常启动。
+/// 警告非空时说明本次配置无法写盘，修改将不会持久化到磁盘。
+pub fn load_or_init_graceful() -> (AppConfig, Option<String>) {
+    match load_or_init() {
+        Ok(config) => (config, None),
+        Err(e) => {
+            // TODO(阶段 10): 替换为 log::error!
+            eprintln!("[config] 降级为内存默认配置：{}", e);
+            (default_config(), Some(e))
+        }
+    }
+}
+
 /// 从 INI 加载配置，不存在或失败时写入默认配置 — 阶段 9
 ///
 /// - 文件存在且解析成功 → 返回解析结果
 /// - 文件不存在 → 创建默认配置并写入，返回默认配置
 /// - 文件损坏（解析失败）→ 用默认配置覆盖，不备份，返回默认配置
+/// - 写盘失败 → 返回 Err（由 load_or_init_graceful 捕获降级）
 pub fn load_or_init() -> Result<AppConfig, String> {
     let path = config_path()?;
 
