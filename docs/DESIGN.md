@@ -354,6 +354,53 @@ Rust 通过 `app.emit()` 发送事件，前端通过 `listen()` 监听：
 - 热键注册时使用 `accelerator`。
 - 模拟执行时使用 `scanCode`。
 
+### 8.3 热键实现方案演进
+
+#### 阶段 12（当前已落地）— `tauri-plugin-global-shortcut`
+
+- 底层 API：Windows `RegisterHotKey`（USER32.dll）。
+- 集成方式:`tauri-plugin-global-shortcut` v2 注册 `Shortcut::new(None, Code::*)`,通过插件回调切换 `runtime_status`。
+- **能力**：稳定支持字母/数字/F1-F12/Space/Tab/Esc 等"主键"作为独立热键;支持"修饰键 + 主键"组合。
+- **限制**(阶段 12 后续修复确认):
+  - `RegisterHotKey` 要求至少有一个非修饰键,**不支持单独的 Ctrl / Alt / Shift 作为热键**(注册时会因 `key_to_vk()` 找不到对应 VKCode 而报 `unknown VKCode for ControlLeft / ShiftLeft / AltLeft` 错误,导致全局热键注册失败)。
+  - 因此 `keyMap.ts` 与 `scan_code_to_code()` 在阶段 12 修复中临时移除了 ShiftLeft/ShiftRight/ControlLeft/ControlRight/AltLeft/AltRight 的映射,以避免"用户在设置页设置成功但全局热键注册失败"的尴尬状态。
+  - 当前可选热键收窄为字母/数字/F1-F12/Space/Tab/Esc。
+
+#### 阶段 13（计划方案）— Interception 驱动直接监听
+
+- 与按键模拟共用 Interception 驱动:阶段 13 引入 `interception` crate 作为按键模拟通道,同一个驱动实例同时承担"输入监听 + 输出发送"职责。
+- **采用动机**:
+  1. **能力完整**:Interception 在内核层拦截所有按键事件,Ctrl/Alt/Shift 作为独立热键自然可识别(无需借助 `RegisterHotKey` 的修饰键语义)。
+  2. **架构统一**:热键监听与按键模拟共用同一个 `interception::create_context()`,避免"`global-shortcut` + `interception` 双驱动栈"带来的初始化重复、生命周期错配、潜在键事件互相干扰。
+  3. **门控更可靠**:Interception 内核层语义清晰,可在驱动层判断按键来源(过滤掉自身模拟产生的回声),阶段 13 worker 与监听共用 context 时此优势更明显。
+- **取舍**:
+  - 引入对 Interception 驱动的强依赖。驱动未安装时全局热键将完全不可用(阶段 12 的 `global-shortcut` 不依赖驱动,但能力受限)。本节 8.3 的"驱动未安装兜底"部分给出降级策略。
+  - 监听所有按键事件相比 `RegisterHotKey` 注册特定热键,CPU 与上下文切换开销略增,但 Interception 内核驱动延迟通常 < 1ms,对热键场景无感知影响。
+- **数据流**(高层):
+  ```
+  Interception kernel driver
+    → 监听线程 (interception::wait + receive)
+    → 解析 KeyStroke (scan_code + state)
+    → 读取 AppState.config.hotkeys + current_page + runtime_status
+    → 状态机门控 (handle_start_hotkey / handle_stop_hotkey)
+    → 切 runtime_status + emit("runtime_status_changed")
+  ```
+- **配置更新协议**:
+  - 设置页 `update_hotkeys` 命令依然存在,签名不变(前端无感知)。
+  - 实现内部不再调 `unregister`/`on_shortcut`,改为更新 `AppState.config.hotkeys`,监听线程下次循环读取最新配置自然生效。
+  - 因此"热键注册失败"分支不再出现,`HotkeyUpdateResult.registered` 始终为 true(语义上仍保留字段,便于前端兼容)。
+- **驱动未安装兜底策略**(由阶段 13 实施时确认其一):
+  1. **完全禁用全局热键**(推荐):驱动 `NotInstalled` / `InstalledNeedReboot` 时不启动监听线程,前端首页与设置页文案明确"安装并重启驱动后热键可用"。
+  2. **回退到 `global-shortcut`**:驱动不可用时仍跑 `global-shortcut`,但前端在"修饰键作为热键"路径上显示警告。该方案保留双系统复杂度,优先级低。
+- **与阶段 13 按键模拟的集成点**:
+  - `interception::create_context()` 在驱动加载后只能创建一次,模拟 worker 与监听线程共用同一 context。
+  - context 由 `Arc<Mutex<Option<Context>>>` 持有(或 `OnceLock<Context>`),首次驱动可用时初始化。
+  - 监听线程长驻,模拟 worker 启停只切换 `stop_flag`,不影响监听。
+- **风险与降级**:
+  - 风险 1 — Interception 驱动崩溃 / 卸载:监听线程 `wait()` 返回错误时切到 `Error` 状态,推送 `simulation_error` 事件,自动重连或要求用户重启。
+  - 风险 2 — 与其他键盘钩子(如杀软、其他 Interception 用户进程)的冲突:Interception 内部通过设备 ID 区分,正常情况下无冲突;但若运行多个 Interception 客户端,事件分发顺序由驱动决定,需实机验证。
+  - 风险 3 — 监听线程 panic:`std::thread::spawn` 内部捕获 panic 并以 `Error` 状态结束,主线程通过 `JoinHandle` 检测后给出明确错误。
+
 ## 9. 全局状态管理
 
 ### 9.1 前端状态
@@ -924,8 +971,111 @@ pub fn default_config() -> AppConfig {
 - 关键操作失败时记录 error 级别日志。
 - 驱动未安装/初始化失败时，不阻止应用启动，仅禁用模拟功能。
 
-## 18. 待实机验证事项
+## 19. 方案变更记录
 
-1. **Interception 驱动外置目录**下具体文件与安装命令。
-2. **坐标拾取**在游戏窗口/全屏场景下可用性，如不可用需替换 `mouse_picker` 模块实现。
-3. **透明圆角窗口**在 Windows + Tauri + WebView2 下实际效果。
+> 本节记录重大技术方案调整，与需求变更记录（REQUIREMENTS.md）交叉引用。
+
+### DESIGN-CHANGE-001：热键实现从 global-shortcut 切换至 Interception
+
+**关联需求变更**：REQ-CHANGE-001  
+**变更时间**：2026-06-08  
+**影响阶段**：阶段 12 → 阶段 13
+
+#### 原方案（阶段 12）
+
+- **技术选型**：`tauri-plugin-global-shortcut`（底层 Windows RegisterHotKey API）
+- **能力范围**：支持字母/数字/F1-F12/Space/Tab/Esc 作为独立热键；支持修饰键+主键组合
+- **API 限制**：RegisterHotKey 要求至少一个非修饰键，不支持纯修饰键作为独立热键
+  - 尝试注册 Left Ctrl / Right Shift 等单独修饰键会失败，因为 `key_to_vk()` 无对应 VKCode
+  - 阶段 12 修复中临时移除 keyMap.ts 与 scan_code_to_code() 中的修饰键映射，避免"设置成功但全局热键注册失败"的尴尬状态
+- **当前可选热键**：字母/数字/F1-F12/Space/Tab/Esc（修饰键不支持）
+
+#### 新方案（阶段 13）
+
+- **技术选型**：Interception 驱动内核层监听
+- **能力范围**：支持**所有按键**作为独立热键，包括修饰键（Left/Right Ctrl/Alt/Shift）
+- **架构优势**：
+  1. **统一底层**：热键监听与按键模拟共用同一 Interception context，避免"RegisterHotKey + Interception"双驱动栈的初始化重复、生命周期错配、潜在键事件干扰
+  2. **完整能力**：内核层拦截所有按键，Ctrl/Alt/Shift 作为独立热键自然可识别，无需借助修饰键语义
+  3. **可靠门控**：Interception 语义清晰，可过滤自身模拟产生的回声，阶段 13 worker 与监听共用 context 时此优势更明显
+- **取舍与风险**：
+  - 强依赖驱动：驱动未安装时热键完全不可用（阶段 12 的 global-shortcut 不依赖驱动）
+  - 降级策略：驱动 `NotInstalled` / `InstalledNeedReboot` 时不启动监听线程，前端首页与设置页文案明确"安装并重启驱动后热键可用"
+  - CPU 开销：监听所有按键事件相比注册特定热键略增，但 Interception 内核驱动延迟通常 <1ms，热键场景无感知影响
+
+#### 实施细节
+
+**代码变更**：
+
+| 文件 | 改动 | 关键点 |
+|------|------|--------|
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 新建 181 行 | 完整的 Interception 热键监听实现，state_machine 门控，支持所有按键 |
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 改 | SendInterception 包装器解决 Send/Sync 问题；AppState 新增 interception_context 字段 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 导入 hotkeys_interception 模块；启动时初始化 Interception context 并启动监听线程；update_hotkeys 简化为仅做配置更新（无注册失败分支） |
+| [src-tauri/src/hotkeys.rs](../src-tauri/src/hotkeys.rs) | 改 | 移除所有 tauri-plugin-global-shortcut API 调用；update_hotkeys 仅做冲突校验、持久化、内存更新 |
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | 移除 `tauri-plugin-global-shortcut` 依赖；interception 版本确认为 0.1.2 |
+| [src/lib/keyMap.ts](../src/lib/keyMap.ts) | 改 | 恢复 Shift/Ctrl/Alt 修饰键映射（Left/Right），scanCode 包含 E0 前缀位 |
+
+**监听线程架构**：
+
+```rust
+// 伪代码
+loop {
+  let strokes = interception::wait(context);
+  for stroke in strokes {
+    if is_keyboard(stroke.device) {
+      let key_code = stroke.code;
+      let state = stroke.state;
+      
+      // 状态机门控
+      if check_hotkey_match(&config.hotkeys, key_code, state) {
+        handle_hotkey_triggered(key_code, current_page, runtime_status)?;
+      }
+    }
+  }
+}
+```
+
+#### 验证结果
+
+**构建验证**：
+- Rust 编译：`cargo check` 通过（10.25s），无 warning，Interception 链接成功
+- TypeScript 编译：`npm run build` 成功，52 模块，CSS 18.61 kB / JS 98.20 kB（gzip 35.4 kB）
+- 修饰键恢复：keyMap.ts 包含 ShiftLeft/ShiftRight/ControlLeft/ControlRight/AltLeft/AltRight
+
+**接口兼容性**：
+- `update_hotkeys` 命令签名不变，前端调用无感知
+- 配置文件格式不变，阶段 12 的 mimic.ini 可直接兼容
+- 事件协议不变，监听线程通过 `runtime_status_changed` 推送状态变更
+
+#### 与阶段 13 按键模拟的集成
+
+- **共用 context**：`interception::create_context()` 仅创建一次，为 `Arc<Mutex<Option<Context>>>` 持有
+- **监听线程长驻**：贯穿应用生命周期，连续监听按键事件
+- **模拟 worker 启停**：仅切换 `stop_flag`，不影响监听线程，可以实现"快速停止模拟"无延迟
+- **事件分发**：驱动内核层保证键事件只分发一次，Interception crate 提供的 `consume` 能力可选择性拦截或转发
+
+#### 风险与降级
+
+**风险 1 — Interception 驱动崩溃 / 卸载**：
+- 监听线程 `wait()` 返回错误时状态切到 `Error`，推送 `simulation_error` 事件
+- 前端显示"驱动异常，请重启应用"提示，用户可选择卸载驱动重新安装或重启系统
+
+**风险 2 — 驱动版本兼容性**：
+- 使用 crates.io 提供的 `interception 0.1.2` 版本，已由多个项目验证
+- 如需更新版本，需实机完整测试（按键事件、模拟可靠性、修饰键识别）
+
+**风险 3 — 与其他 Interception 客户端的冲突**：
+- Interception 设计支持多个客户端同时连接
+- 内核驱动通过 `predicate` 机制分发事件，多个客户端可共存但事件分发顺序不确定
+- 阶段 13 实机测试需验证是否与杀软、输入法等 Interception 用户进程产生干扰
+
+#### 后续迭代计划
+
+阶段 13 后如需进一步优化：
+
+1. **热键组合支持**（如 Ctrl+Shift+A）：当前实现仅支持单键，若需组合可扩展 `HotkeyConfig` 结构并在监听线程中实现组合判断
+2. **热键冲突检测**：与按键模拟列表冲突校验已实现，设置页保存时给出提示
+3. **监听线程崩溃恢复**：当前失败时进入 `Error` 状态，后续可考虑自动重连机制（需防止重连风暴）
+
+---

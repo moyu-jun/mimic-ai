@@ -66,13 +66,14 @@ const KEY_MAP: KeyMapEntry[] = [
   { code: 'Space', keyLabel: 'Space', scanCode: 57 },
   { code: 'Tab', keyLabel: 'Tab', scanCode: 15 },
   { code: 'Escape', keyLabel: 'Esc', scanCode: 1 },
-  // 左右 Shift/Ctrl/Alt
+  // 修饰键（阶段 13 恢复：Interception 支持修饰键作为独立热键）
+  // 注意：Right Ctrl/Alt 的 scanCode 包含 E0 前缀位，Interception 内部处理
   { code: 'ShiftLeft', keyLabel: 'Left Shift', scanCode: 42 },
   { code: 'ShiftRight', keyLabel: 'Right Shift', scanCode: 54 },
   { code: 'ControlLeft', keyLabel: 'Left Ctrl', scanCode: 29 },
-  { code: 'ControlRight', keyLabel: 'Right Ctrl', scanCode: 29 },
+  { code: 'ControlRight', keyLabel: 'Right Ctrl', scanCode: 157 },
   { code: 'AltLeft', keyLabel: 'Left Alt', scanCode: 56 },
-  { code: 'AltRight', keyLabel: 'Right Alt', scanCode: 56 },
+  { code: 'AltRight', keyLabel: 'Right Alt', scanCode: 184 },
 ]
 
 const codeToEntry = new Map(KEY_MAP.map(e => [e.code, e]))

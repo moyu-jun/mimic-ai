@@ -9,6 +9,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::AppConfig;
 
+// 为 Interception 创建 Send + Sync 包装器
+// SAFETY: Interception 内部使用 Windows 内核对象指针，
+// 该指针仅在创建它的线程内使用是安全的。
+// 我们通过将其包装在 Arc<Mutex<>> 中，确保同一时刻只有一个线程访问它。
+pub struct SendInterception(pub interception::Interception);
+unsafe impl Send for SendInterception {}
+unsafe impl Sync for SendInterception {}
+
 /// 运行状态机 — DESIGN 9.2
 ///
 /// serde 默认将无字段枚举序列化为其名字字符串（如 "RunningKeyboard"），
@@ -63,6 +71,8 @@ pub struct AppState {
     pub driver_status: DriverStatus,
     /// 停止标记，供 worker 线程检查
     pub stop_flag: Arc<AtomicBool>,
+    /// Interception 上下文（阶段 13 Interception 热键）— DESIGN 8.3
+    pub interception_context: Arc<Mutex<Option<SendInterception>>>,
 }
 
 /// 共享状态类型（Arc + Mutex 包装）

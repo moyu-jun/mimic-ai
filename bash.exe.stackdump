@@ -50,8 +50,8 @@ Loaded modules:
 7FFF6D4B0000 CFGMGR32.dll
 7FFF6D8E0000 bcrypt.dll
 7FFF6C810000 powrprof.dll
-7FFF6B8C0000 kernel.appcore.dll
 7FFF620A0000 ksuser.dll
+7FFF6B8C0000 kernel.appcore.dll
 7FFF6C9C0000 CRYPTBASE.DLL
 7FFF6C760000 UMPDC.dll
 7FFF6F3E0000 setupapi.dll

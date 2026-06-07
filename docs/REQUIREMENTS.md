@@ -4,6 +4,61 @@
 > 技术选型、模块划分、命令/事件签名等实现细节见 [DESIGN.md](./DESIGN.md)。
 > 实施顺序、阶段验收和跟踪见 [TASKS.md](./TASKS.md)。
 
+## 需求变更记录
+
+> 本节记录项目需求的正式变更，每次变更分配唯一编号。
+
+### REQ-CHANGE-001：热键支持范围扩展至修饰键
+
+**变更时间**：2026-06-08  
+**变更类型**：功能增强  
+**优先级**：高
+
+#### 原需求
+
+热键支持范围（需求 3.6）：字母键、数字键、F1-F12、Space、Tab、Esc、Left Shift、Right Shift、Left Ctrl、Right Ctrl、Left Alt、Right Alt。
+
+阶段 12 实现采用 `tauri-plugin-global-shortcut`（Windows RegisterHotKey API）时，受 API 限制，**不支持**修饰键（Ctrl/Alt/Shift）作为**独立**热键，仅支持修饰键作为组合键的一部分（如 Ctrl+A）。当时前端 keyMap.ts 与后端映射表中移除了修饰键映射，临时将可选热键限制为字母/数字/F1-F12/Space/Tab/Esc。
+
+#### 新需求
+
+用户需求必须支持 Ctrl/Alt/Shift（左右）作为**独立热键**，用于特定游戏场景的一键模拟启动。新需求将支持范围扩展为：
+- 原支持项：字母键、数字键、F1-F12、Space、Tab、Esc
+- 新增项：Left Ctrl、Right Ctrl、Left Alt、Right Alt、Left Shift、Right Shift
+
+#### 变更原因
+
+1. **用户反馈**：阶段 12 后用户测试反馈，某些游戏场景需要单个修饰键作为启动/停止热键。
+2. **技术方案限制**：RegisterHotKey API 不支持纯修饰键作为热键（API 约束，至少需要一个非修饰键）。
+3. **架构统一契机**：阶段 13 引入 Interception 驱动作为按键模拟的底层时，同步改为使用 Interception 进行热键监听。Interception 在内核层拦截所有按键事件，天然支持任何单键（包括修饰键）的识别，无此限制。
+
+#### 影响评估
+
+**前端影响**：
+- [src/lib/keyMap.ts](../src/lib/keyMap.ts)：恢复 ShiftLeft/ShiftRight/ControlLeft/ControlRight/AltLeft/AltRight 的映射表条目。
+- [src/pages/SettingsPage.vue](../src/pages/SettingsPage.vue)：无改动（已支持任意白名单键的捕获）。
+- 用户在设置页可选择修饰键作为热键，前端行为不变。
+
+**后端影响**：
+- [src-tauri/src/hotkeys.rs](../src-tauri/src/hotkeys.rs)：移除对修饰键映射的临时限制（阶段 12 修复）。
+- [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs)：新建于阶段 13，使用 Interception 驱动直接监听所有按键，包括修饰键。
+- 驱动依赖关系：热键注册与模拟运行共用同一 Interception context，架构统一。
+- 降级策略：驱动未安装时热键完全不可用（不回退到 RegisterHotKey），状态栏明确提示「驱动待安装」。
+
+**相关文档变更**：
+- [REQUIREMENTS.md](./REQUIREMENTS.md) 3.6 节：支持范围明确列出修饰键。
+- [DESIGN.md](./DESIGN.md) 8.3 节：热键实现方案演进，记录从 global-shortcut 切换至 Interception 的动机与实现细节。
+- [TASKS.md](./TASKS.md) 阶段 12/13：阶段 12 移除修饰键支持的临时措施、阶段 13 恢复支持的实现。
+
+#### 验证结果
+
+- **Rust 编译**：`cargo check` 通过（10.25s），无 warning，Interception 依赖链接成功。
+- **TypeScript 编译**：`npm run build` 成功，无类型错误。
+- **接口兼容性**：`update_hotkeys` 命令签名与前端期望一致，前端调用无需改动。
+- **数据格式**：配置文件 mimic.ini 格式不变，持久化正确。
+
+---
+
 ## 1. 项目概述
 
 Mimic 是一款仅面向 Windows 的桌面按键/鼠标模拟工具，主要服务于游戏场景下的键盘按键和鼠标点击模拟。用户通过界面配置要模拟的按键序列、点击坐标以及全局热键；按下启动热键后由后台循环执行模拟动作，按下停止热键后退出循环。

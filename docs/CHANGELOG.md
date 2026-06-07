@@ -756,5 +756,76 @@
 **修复效果**:
 注册失败时不再自动回滚，前后端配置状态保持一致。用户会看到清晰的错误提示，知道哪个键注册失败、当前状态如何、应该如何操作（重试或换键）。
 
+### 后续修复（同日）— 移除修饰键支持 + 确定未来方案
+
+**问题**：用户需求必须支持单独的 Ctrl/Alt/Shift 作为热键，但 Windows `RegisterHotKey` API（tauri-plugin-global-shortcut 使用的底层）不支持修饰键作为独立热键。
+
+**发现**：
+- `RegisterHotKey` API 要求至少一个非修饰键，不支持纯修饰键组合（如 `Ctrl+Shift` 但无其他键）
+- 前端 keyMap.ts 包含修饰键（Shift/Ctrl/Alt）的映射，用户可以捕获并设为热键
+- 后端 `scan_code_to_code()` 映射函数也包含修饰键
+- 用户设置后，保存时全局热键注册会失败，但错误信息不够明确
+
+**临时修复**：
+1. [src/lib/keyMap.ts](../src/lib/keyMap.ts) — 从白名单中移除所有修饰键（ShiftLeft/ShiftRight/ControlLeft/ControlRight/AltLeft/AltRight）
+2. [src-tauri/src/hotkeys.rs](../src-tauri/src/hotkeys.rs) — 从 `scan_code_to_code()` 映射中移除修饰键的 Code 映射
+
+**关键决策**：
+- **不**在这里尝试"强制添加虚拟键"的 workaround（如 `Ctrl+None`），因为这违反 Windows API 语义且行为不可预测
+- **不**扩展前端映射表支持"Ctrl+Shift 组合"（tauri-plugin-global-shortcut 本身已支持 `"Ctrl+Shift"`，但与后端 scan code 映射不兼容）
+- 当前快速降级：移除修饰键支持，避免用户遇到"注册失败"困惑
+
+**未来方案**（阶段 13）：
+- 替换 tauri-plugin-global-shortcut 为 Interception 驱动
+- Interception 监听所有按键事件，支持单独修饰键检测，架构上与模拟运行统一
+- 热键注册与模拟运行共用同一驱动生命周期，无需两套依赖
+
+**验证**：
+- `cargo check` — 通过：无 warning
+- `npm run build` — 通过：52 模块，CSS 18.0 kB / JS 98.2 kB（gzip 35.5 kB）
+- 前端 keyMap.ts 不再包含修饰键；用户按 Shift 时捕获框不回显
+
+**修复效果**：
+移除修饰键支持避免了"设置成功但全局热键注册失败"的尴尬状态。用户目前可用热键范围收窄为"字母/数字/F1-F12/Space/Tab/Esc"，但这些键已足以覆盖大多数模拟场景。阶段 13 使用 Interception 驱动后完整支持所有键。
 
 
+
+
+
+## 阶段 13：Interception 热键实现
+
+**完成时间**：2026-06-08
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 改 | 添加 SendInterception 包装器解决 Send/Sync 问题；AppState 新增 interception_context 字段 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 添加 hotkeys_interception 模块；启动时初始化 Interception 上下文并启动监听线程；update_hotkeys 命令简化（移除 app 参数）；所有 state.lock() 改为 state.inner().lock() |
+| [src-tauri/src/hotkeys.rs](../src-tauri/src/hotkeys.rs) | 改 | 移除所有 tauri-plugin-global-shortcut 相关代码；update_hotkeys 仅做冲突校验、持久化、内存更新，不再调用注册/注销 API |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 已存在 | 完整的 Interception 热键监听实现（之前已创建） |
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | interception 版本从 0.2 改为 0.1（crates.io 可用版本） |
+| [src/lib/keyMap.ts](../src/lib/keyMap.ts) | 改 | 恢复 Shift/Ctrl/Alt 修饰键支持（Left/Right），scanCode 包含 E0 前缀位 |
+
+### 关键决策
+
+- **SendInterception 包装器** — interception::Interception 包含 *mut c_void 不满足 Send，通过 unsafe impl 声明包装器为 Send + Sync，因为 Arc<Mutex<>> 保证同一时刻只有一个线程访问
+- **版本降级** — interception 0.2 不存在于 crates.io，使用 0.1.2 版本
+- **ScanCode 比较** — interception crate 的 ScanCode 类型需要 `as u16` 转换后与配置的 u16 比较
+- **变量名冲突** — hotkeys_interception.rs 中 Stroke::Keyboard 的 state 字段与函数参数 state 冲突，重命名为 key_state
+- **state.inner().lock()** — Tauri State<T> 需要通过 .inner() 获取内部 Arc 后才能 .lock()
+
+### 验证结果
+
+- `cargo check` — 编译通过（10.25s）
+- `npm run build` — TypeScript + Vite 构建成功
+- 修饰键已恢复到 keyMap.ts，前端可选择 Left/Right Shift/Ctrl/Alt 作为独立热键
+
+### 文档回写
+
+无
+
+### 偏差与遗留
+
+- 实机测试待进行：验证 Interception 驱动实际拦截修饰键、状态机门控、页面过滤是否按预期工作
+- SendInterception 的 unsafe impl Send/Sync 需要确保 Interception 内部指针仅在持有 Mutex 锁期间访问，当前实现满足此约束

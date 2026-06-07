@@ -10,11 +10,12 @@ mod admin;
 mod config;
 mod driver;
 mod hotkeys;
+mod hotkeys_interception;
 mod state;
 
 use config::AppConfig;
 use hotkeys::HotkeyUpdateResult;
-use state::{AppState, RuntimeStatus, SharedState};
+use state::{AppState, RuntimeStatus, SendInterception, SharedState};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -24,6 +25,7 @@ use tauri_plugin_log::{Target, TargetKind};
 #[tauri::command]
 fn load_config(state: tauri::State<SharedState>) -> Result<AppConfig, String> {
     let app_state = state
+        .inner()
         .lock()
         .map_err(|e| format!("Failed to lock state: {}", e))?;
     Ok(app_state.config.clone())
@@ -37,6 +39,7 @@ fn save_config(config: AppConfig, state: tauri::State<SharedState>) -> Result<()
     // 运行态守卫 — DESIGN 6.1
     {
         let app_state = state
+            .inner()
             .lock()
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         match app_state.runtime_status {
@@ -57,6 +60,7 @@ fn save_config(config: AppConfig, state: tauri::State<SharedState>) -> Result<()
 
     // 写盘成功后才更新内存
     let mut app_state = state
+        .inner()
         .lock()
         .map_err(|e| format!("Failed to lock state: {}", e))?;
     app_state.config = config;
@@ -67,7 +71,7 @@ fn save_config(config: AppConfig, state: tauri::State<SharedState>) -> Result<()
 /// 读取启动时配置写盘失败的警告 — 阶段 9
 #[tauri::command]
 fn get_init_warning(state: tauri::State<SharedState>) -> Option<String> {
-    state.lock().ok()?.config_warning.clone()
+    state.inner().lock().ok()?.config_warning.clone()
 }
 
 /// 当前进程是否以管理员身份运行 — DESIGN 14.1 / 阶段 10
@@ -83,6 +87,7 @@ fn get_admin_status() -> bool {
 #[tauri::command]
 fn check_driver_status(state: tauri::State<SharedState>) -> Result<String, String> {
     let app_state = state
+        .inner()
         .lock()
         .map_err(|e| format!("Failed to lock state: {}", e))?;
     Ok(serde_json::to_string(&app_state.driver_status)
@@ -106,6 +111,7 @@ fn install_interception_driver(state: tauri::State<SharedState>) -> Result<(), S
     // 运行态守卫 — DESIGN 6.1
     {
         let app_state = state
+            .inner()
             .lock()
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         match app_state.runtime_status {
@@ -122,7 +128,7 @@ fn install_interception_driver(state: tauri::State<SharedState>) -> Result<(), S
 
     // 安装后重新检测并更新 state
     let new_status = driver::check_interception_driver();
-    if let Ok(mut app_state) = state.lock() {
+    if let Ok(mut app_state) = state.inner().lock() {
         app_state.driver_status = new_status;
     }
 
@@ -170,14 +176,14 @@ fn set_current_page(page: String, state: tauri::State<SharedState>) -> Result<()
     Ok(())
 }
 
-/// 更新热键配置 — 阶段 12 / DESIGN 6.2
+/// 更新热键配置 — 阶段 13 / DESIGN 6.2
 ///
-/// 流程：对比变化 → 注销旧热键 → 注册新热键 → 持久化。
-/// 返回结构化结果供前端分别提示注册成功/失败与持久化成功/失败。
+/// 流程：对比变化 → 持久化 → 更新内存。
+/// Interception 热键由后台监听线程统一处理，不需要注册/注销。
+/// 返回结构化结果供前端分别提示持久化成功/失败。
 #[tauri::command]
 fn update_hotkeys(
     hotkeys: config::HotkeyConfig,
-    app: tauri::AppHandle,
     state: tauri::State<SharedState>,
 ) -> Result<HotkeyUpdateResult, String> {
     // 运行态守卫 — DESIGN 6.1
@@ -195,7 +201,7 @@ fn update_hotkeys(
         }
     }
 
-    hotkeys::update_hotkeys(&app, &state, hotkeys)
+    hotkeys::update_hotkeys(&state, hotkeys)
 }
 
 /// 停止模拟 — 阶段 12（仅切换状态）
@@ -353,28 +359,48 @@ pub fn run() {
             let driver_status = driver::check_interception_driver();
             log::info!("[setup] driver status: {:?}", driver_status);
 
-            // 热键注册 — DESIGN 13.1 步骤 4 / 阶段 12
-            if let Err(e) = hotkeys::register_hotkeys(app.handle(), &loaded_config.hotkeys) {
-                log::error!("[setup] hotkey registration failed: {}", e);
-                // 发送 hotkey_registration_failed 事件
-                let _ = app.emit(
-                    "hotkey_registration_failed",
-                    serde_json::json!({ "error": e }),
-                );
+            // 初始化 Interception 上下文 — DESIGN 8.3 / 阶段 13
+            let interception_ctx = if matches!(&driver_status, state::DriverStatus::Ready) {
+                match interception::Interception::new() {
+                    Some(ctx) => {
+                        log::info!("[setup] Interception context created");
+                        Arc::new(Mutex::new(Some(SendInterception(ctx))))
+                    }
+                    None => {
+                        log::error!("[setup] Interception context creation failed");
+                        Arc::new(Mutex::new(None))
+                    }
+                }
             } else {
-                log::info!("[setup] hotkeys registered");
-            }
+                log::warn!("[setup] Interception not ready, context not created");
+                Arc::new(Mutex::new(None))
+            };
 
-            let initial_state = AppState {
+            // 启动 Interception 热键监听线程 — DESIGN 8.3 / 阶段 13
+            let shared_state: SharedState = Arc::new(Mutex::new(AppState {
                 config: loaded_config,
                 config_warning,
                 current_page: "home".to_string(),
                 runtime_status: RuntimeStatus::Idle,
-                driver_status,
+                driver_status: driver_status.clone(),
                 stop_flag: Arc::new(AtomicBool::new(false)),
-            };
+                interception_context: interception_ctx.clone(),
+            }));
 
-            let shared_state: SharedState = Arc::new(Mutex::new(initial_state));
+            if matches!(&driver_status, state::DriverStatus::Ready) {
+                if let Err(e) = hotkeys_interception::start_hotkey_listener(
+                    app.handle().clone(),
+                    shared_state.clone(),
+                    interception_ctx.clone(),
+                ) {
+                    log::error!("[setup] Interception hotkey listener failed: {}", e);
+                } else {
+                    log::info!("[setup] Interception hotkey listener started");
+                }
+            } else {
+                log::warn!("[setup] Interception not ready, hotkeys disabled");
+            }
+
             app.manage(shared_state);
 
             log::info!("[setup] ready");

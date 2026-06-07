@@ -337,15 +337,25 @@
 - [ ] 设置页修改并保存热键后实时生效；冲突时拒绝并提示（依赖实机交互，与阶段 16 一并复核）
 - [ ] 最小化 / 失焦后热键仍触发；蒙版随状态自动出现/消失（依赖实机交互，与阶段 16 一并复核）
 
+**偏差与遗留**：
+
+- 修饰键（Ctrl/Alt/Shift）当前**不支持**作为独立热键 — Windows `RegisterHotKey` API 限制（不允许纯修饰键作为热键），`global-hotkey` 内部的 `key_to_vk()` 也不收录 ControlLeft / ShiftLeft / AltLeft 等修饰键。前端 [src/lib/keyMap.ts](src/lib/keyMap.ts) 与后端 [src-tauri/src/hotkeys.rs](src-tauri/src/hotkeys.rs) 的 `scan_code_to_code()` 已临时移除修饰键映射，避免「设置成功但全局热键注册失败」的尴尬状态。
+- 当前可选热键收窄为字母 / 数字 / F1-F12 / Space / Tab / Esc。
+- 修复方案见 [DESIGN.md](./DESIGN.md) 8.3 节：**阶段 13 引入 Interception 驱动**作为热键监听与按键模拟的共用底层，Interception 在内核层监听所有按键事件，可天然识别单独的 Ctrl / Alt / Shift。届时恢复修饰键映射并替换 `tauri-plugin-global-shortcut`。
+- 阶段 13 引入 Interception 后，`update_hotkeys` 命令签名（`HotkeyUpdateResult`）保持不变；实现改为「更新内存配置」（无注册失败分支），前端无需调整。
+
 ---
 
 ### 阶段 13：按键模拟 worker + 命令守卫
 
-**目标**：把阶段 12 的「事件 mock」替换为真实按键模拟循环，并加上后端运行态命令守卫。
+> **重要变更**：本阶段引入 Interception 驱动时，**同步完成了阶段 12 热键功能的升级**（支持修饰键作为独立热键）。两者共用同一 Interception context，架构统一。详见需求变更 REQ-CHANGE-001 与设计变更 DESIGN-CHANGE-001。
+
+**目标**：把阶段 12 的「事件 mock」替换为真实按键模拟循环，并加上后端运行态命令守卫；同时从 `tauri-plugin-global-shortcut` 切换至 Interception 驱动进行热键监听，支持修饰键作为独立热键。
 
 任务：
 
-1. 在 [src-tauri/Cargo.toml](src-tauri/Cargo.toml) 加 `interception = "0.2"`。
+0. **（阶段 12 热键升级 — 已完成）**：切换热键实现至 Interception，恢复修饰键支持。详见 CHANGELOG 阶段 13 前半部分与设计变更 DESIGN-CHANGE-001。
+1. 在 [src-tauri/Cargo.toml](src-tauri/Cargo.toml) 加 `interception = "0.1"`（已完成）；移除 `tauri-plugin-global-shortcut` 依赖。
 2. 实现 [src-tauri/src/input/keyboard.rs](src-tauri/src/input/keyboard.rs)：懒初始化 `interception::create_context`，遍历 1-20 选键盘设备（DESIGN 12.4）。
 3. 实现 `run_keyboard_simulation(actions, stop_flag)`（DESIGN 10.1）：循环勾选项 down→up→sleep。
 4. 热键回调启动模拟：克隆勾选 actions、`Arc<AtomicBool>` 停止标记、`std::thread::spawn` worker；停止热键设置 flag，等待 worker 退出后状态回 `ReadyKeyboard`。
