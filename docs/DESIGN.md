@@ -700,6 +700,16 @@ pub fn run_keyboard_simulation() {
 
 **实现方式**：不在 manifest 中强制 `requireAdministrator`，而是运行时检测权限状态。
 
+### 14.2 阶段 10 落地形态
+
+- 后端模块 `src-tauri/src/admin.rs`，依赖 `windows-sys` 0.59（Win32_Foundation / Win32_Security / Win32_System_Threading / Win32_UI_Shell），仅在 `#[cfg(windows)]` 下提供真实实现。
+- `is_admin()` → `OpenProcessToken(GetCurrentProcess, TOKEN_QUERY)` + `GetTokenInformation(TokenElevation)`；任一 API 失败均视为「非管理员」并 `log::warn!`。
+- `restart_as_admin()` → `ShellExecuteW` 以 `runas` verb 拉起当前 exe 路径，失败返回错误字符串（用户取消 UAC 也算失败）。
+- Tauri 命令：
+  - `get_admin_status() -> bool`（首页 onMounted 调用）
+  - `request_admin_restart(app: AppHandle) -> Result<(), String>`：调度成功后由后端 spawn 一个延迟 200ms 的线程调用 `app.exit(0)`，给前端留出 UI 反馈窗口，避免双开。
+- 关键点都加了 `// ADMIN_POLICY:` 标记：`admin.rs` 模块顶部、`get_admin_status` 命令、`request_admin_restart` 命令、`setup` 内权限检测处。
+
 ## 15. 前端样式设计
 
 ### 15.1 主题变量

@@ -128,8 +128,7 @@ pub fn load_or_init_graceful() -> (AppConfig, Option<String>) {
     match load_or_init() {
         Ok(config) => (config, None),
         Err(e) => {
-            // TODO(阶段 10): 替换为 log::error!
-            eprintln!("[config] 降级为内存默认配置：{}", e);
+            log::error!("[config] fallback to in-memory default: {}", e);
             (default_config(), Some(e))
         }
     }
@@ -146,6 +145,7 @@ pub fn load_or_init() -> Result<AppConfig, String> {
 
     if !path.exists() {
         // 文件不存在，写入默认配置
+        log::info!("[config] mimic.ini not found, writing default");
         let default = default_config();
         save(&default)?;
         return Ok(default);
@@ -156,7 +156,7 @@ pub fn load_or_init() -> Result<AppConfig, String> {
         Ok(config) => Ok(config),
         Err(e) => {
             // 解析失败，用默认配置覆盖
-            eprintln!("Failed to parse INI, overwriting with default: {}", e);
+            log::error!("[config] failed to parse INI, overwriting with default: {}", e);
             let default = default_config();
             save(&default)?;
             Ok(default)

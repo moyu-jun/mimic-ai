@@ -487,3 +487,60 @@
 - `save_config` 命令的运行期门控（"busy" 错误返回）在阶段 12 真实模拟运行时验证。
 
 
+---
+
+## 阶段 10：日志 + UAC 提权 + 首页权限状态
+
+**完成时间**：2026-06-07
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | 新增 `tauri-plugin-log = "2"`、`log = "0.4"`；`[target."cfg(windows)".dependencies]` 段加 `windows-sys = "0.59"`，启用 Foundation / Security / System_Threading / UI_Shell / UI_WindowsAndMessaging 五个 feature |
+| [src-tauri/src/admin.rs](../src-tauri/src/admin.rs) | 新建 | `#[cfg(windows)]` 真实实现 + 非 Windows 占位；`is_admin()` 走 `OpenProcessToken` + `GetTokenInformation(TokenElevation)`；`restart_as_admin()` 走 `ShellExecuteW("runas")`；模块顶部加 `// ADMIN_POLICY:` 标记 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | `mod admin;` 导入；`tauri_plugin_log::Builder` 装配 Stdout + LogDir 双 Target、debug 时 Info 而 release 时 Error；setup 顺序按 DESIGN 13.1 落地（日志先于 config）；新增 `get_admin_status / request_admin_restart` 命令 |
+| [src-tauri/src/config.rs](../src-tauri/src/config.rs) | 改 | `eprintln!` → `log::error!`；写入默认配置时追加一条 `log::info!` |
+| [src-tauri/capabilities/default.json](../src-tauri/capabilities/default.json) | 改 | 追加 `log:default` 权限 |
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 改 | mock `isAdmin` 改为 `ref(true)` 并在 `onMounted` 内 `invoke<boolean>('get_admin_status')` 覆盖；未授权分支多渲染「以管理员身份重启」按钮 + `restartError` 提示；`get_init_warning` 与 `get_admin_status` 用 `Promise.all` 并行触发 |
+| [docs/DESIGN.md](./DESIGN.md) | 改 | 新增 14.2 节「阶段 10 落地形态」记录 admin.rs 依赖、命令名、退出策略 |
+| [docs/TASKS.md](./TASKS.md) | 改 | 阶段 10 总览状态「待开始」→「✅ 已完成」；顺手把阶段 9 第 4 条遗留未勾的验收点（间隔失焦写盘）补勾 |
+
+### 关键决策
+
+- **`tauri-plugin-log` 而非 `tracing` 直配**：DESIGN 13 推荐 `tauri-plugin-log` 优先，理由是开箱即可写日志目录、与 Tauri 生命周期绑定。`tracing` 灵活但需要自己挂 file appender，对当前需求是过度工程（YAGNI）。debug 时 `Info` / release 时 `Error` 用 `cfg!(debug_assertions)` 条件赋值，零运行时开销。
+- **`Target::new(TargetKind::LogDir { file_name: None })`**：`file_name: None` 让插件按默认规则用 `productName` 或 `bundle.identifier` 命名日志文件，避免硬编码文件名（实机日志路径在阶段 16 用 `app.path().log_dir()` 一并复核）。
+- **`windows-sys` 0.59 而非 `windows` crate**：`windows-sys` 是裸 FFI（无 RAII 包装、无 Result 适配），编译速度更快、二进制更小，对仅调三个 API（OpenProcessToken / GetTokenInformation / ShellExecuteW）的场景刚好够用。`windows` crate 的安全包装在这里不值得它的编译时间。
+- **`#[cfg(windows)]` 守卫 + 非 Windows 占位**：项目仅打包 Windows，但保留 `cfg(not(windows))` fallback 是为了「`cargo check` 在任何平台都能跑通」— 我自己在沙箱里 `cargo check` 时也避免被「未启用的 target」绊住。占位用 `false` / `Err("only on Windows")` 而非 `unreachable!()`，语义更明确。
+- **`ShellExecuteW` 返回值的整数判定**：HINSTANCE 在 windows-sys 中类型为 `*mut c_void`，按 Win32 文档 `<= 32` 视为错误码。强转 `as isize` 比解构 raw ptr 简单一档；这里不在意具体错误码值，只用作「成功 / 失败」二元判断。
+- **`request_admin_restart` 调度后延迟 200ms 退出**：`ShellExecuteW` 是异步的，调用后新进程未必立刻起来；如果当前进程立即 `app.exit(0)`，UI 不能给出「正在重启」的反馈、且如果 UAC 弹窗失败用户也不知道发生了什么。Spawn 一个延迟线程把退出推迟 200ms，让前端有时间把 `isRestarting` 设回 false 或显示错误。**不**用 `tokio::time::sleep`：当前 Rust 端没有 tokio 运行时，`std::thread::sleep` + `std::thread::spawn` 是最小依赖的实现。
+- **管理员检测失败一律视为「非管理员」**：`is_admin()` 内任意 API 失败都 `log::warn!` 并返回 false，前端因此显示橙色提示。比起返回 `Result<bool, _>`，这里降级为 bool 更符合 UI 的二态语义；真出问题时日志里能定位。
+- **前端 `isAdmin` 默认值用 `true` 而非 `false`**：`onMounted` 是异步的，首次渲染会闪过初始值。默认 `true`（绿色「已授予」）→ 异步覆盖为真实值，比起默认 `false`（橙色「受限」→ 闪烁）观感更稳。即使真实值是非管理员，从「绿色 → 橙色」的切换也比「橙色 → 绿色」更不容易让用户误解为应用启动出错。
+- **`Promise.all` 并行触发 `get_init_warning` + `get_admin_status`**：两个命令彼此独立，串行 await 浪费一次 IPC 往返；`.catch(() => 兜底)` 局部消化错误，确保单个命令失败不破坏另一项 UI。
+- **不引入 `restartError` 的 toast 体系**：当前只有「重启取消 / 失败」一种弱错误，用一行红色小字 `<p>` 足以；引入 toast 框架属于 YAGNI。`String(err).includes('declined')` 是轻量 UAC 取消识别，不依赖 Win32 错误码精确匹配。
+- **`log:default` 权限追加**：tauri-plugin-log 的 `log` 命令（前端通过 `@tauri-apps/plugin-log` 写日志）默认走 ACL；当前前端不调用 plugin-log 但加上 `log:default` 是为阶段 12+ 留口（前端要记录热键注册结果时直接可用），且开销为零。
+- **DESIGN 13.1 启动顺序未完全落地**：阶段 10 仅完成 1（日志）、2（配置加载），驱动检测（3）与热键注册（4）留待阶段 11、12。当前 setup 内有显式注释标记后续阶段的插入点，避免后人接手时找不到锚点。
+
+### 验证结果
+
+- `cargo check`（src-tauri）— 通过：5.94s，无 warning。
+- `cargo build`（src-tauri，dev profile 完整链接）— 通过：1m 31s，windows-sys / tauri-plugin-log 全部链接成功，无 warning。
+- `npm run build`（vue-tsc + Vite）— 通过：52 模块，CSS 18.06 kB / JS 96.59 kB（gzip 34.93 kB），无 TS 错误。
+- 静态分析：
+  - `is_admin` 在 setup 阶段被调用一次，结果通过 `log::info!` 输出 `elevated / limited`；
+  - `request_admin_restart` 命令注册成功（见 `invoke_handler`）；
+  - `tauri_plugin_log` 装配位于 `tauri_plugin_opener` 之前，确保 opener 内日志也走插件 sink。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 10 状态「待开始」→「✅ 已完成」，五条 UI/UAC 验收点保留未勾并加注「依赖实机交互，与阶段 16 一并复核」；同时补勾阶段 9 第 4 条「间隔失焦才写盘」（CHANGELOG 阶段 9 已声明通过，但 TASKS 当时漏勾）。
+- [docs/DESIGN.md](./DESIGN.md) — 新增 14.2 节「阶段 10 落地形态」记录 admin.rs 依赖与命令签名，便于后续阶段引用。
+- REQUIREMENTS — 无改动。
+
+### 偏差与遗留
+
+- **五条 UI/UAC 验收点未实机验证**：`cargo build` 已确认链接通过，但「点击 UAC 提示按钮 → 重启 → 首页变绿」整条交互链需要 Windows 实机；release 包日志级别也无法在 dev 下确认。统一推到阶段 16 实机复核。
+- **日志目录路径未记录到 README**：当前由 tauri-plugin-log 默认决定（Windows 一般是 `%APPDATA%/<identifier>/logs/`），实机首次跑通后再写进运维文档（阶段 16 收尾任务）。
+- **`request_admin_restart` 在用户拒绝 UAC 后未自动复位 `isRestarting` 的 200ms 间隙**：理论上有一段非常短的窗口（用户秒拒 UAC + 后端尚未触发延迟退出）按钮显示「正在重启...」但其实命令已 reject 抛错回前端 — 这条路径前端 catch 后已立即把 `isRestarting` 设回 false，但视觉上可能闪烁一帧。属于 LOW 级体验问题，阶段 16 打磨时若实机观察到再处理。
+- **`tauri-plugin-opener` 未清理**：审查回执 L6 提及，但当前阶段未触动 opener；阶段 12 接全局热键时一并清理（与 opener 无依赖关系，但收口动作放一起更整洁）。
+

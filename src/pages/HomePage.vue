@@ -2,7 +2,8 @@
 /**
  * 首页 — 状态仪表盘（DESIGN 15.4 / 需求 3.3.1）
  * 阶段 9：onMounted 调用 get_init_warning，有写盘失败时显示小字提示。
- *   - 管理员权限：阶段 10 接 get_admin_status
+ * 阶段 10：管理员权限状态接 get_admin_status；未授权时提供「以管理员身份重启」按钮，
+ *         点击触发 request_admin_restart（UAC 提示 + 自身退出）。
  *   - 驱动状态：阶段 11 接 check_driver_status / install_driver
  *   - 热键概览：由 load_config 提供（阶段 8 已接入）
  *
@@ -19,8 +20,27 @@ const APP_TAGLINE = 'Windows 按键与鼠标模拟工具'
 // 启动时配置写盘失败的警告（极小概率，默认为空）
 const configWarning = ref<string | null>(null)
 
-// === mock 数据（后续阶段替换为真实命令）===
-const isAdmin = true
+// 阶段 10：管理员权限状态（来自后端 get_admin_status）
+// 默认 true 避免首次渲染闪过橙色警告；onMounted 立即覆盖为真实值。
+const isAdmin = ref(true)
+const isRestarting = ref(false)
+const restartError = ref<string | null>(null)
+
+async function onRestartAsAdmin(): Promise<void> {
+  if (isRestarting.value) return
+  isRestarting.value = true
+  restartError.value = null
+  try {
+    await invoke('request_admin_restart')
+    // 后端会在 200ms 内退出当前进程，前端无需做更多事情
+  } catch (err) {
+    // 用户拒绝 UAC 或调度失败
+    isRestarting.value = false
+    restartError.value = String(err).includes('declined')
+      ? '已取消提权'
+      : '提权重启失败，请稍后重试'
+  }
+}
 
 function onInstallDriver(): void {
   // 阶段 11 接 install_driver；当前为占位，点击无副作用。
@@ -41,11 +61,12 @@ function toggleMockRun(): void {
 }
 
 onMounted(async () => {
-  try {
-    configWarning.value = await invoke<string | null>('get_init_warning')
-  } catch {
-    // 命令本身失败不处理，警告不显示即可
-  }
+  // 并行触发，任一失败不阻塞另一项
+  const warningPromise = invoke<string | null>('get_init_warning').catch(() => null)
+  const adminPromise = invoke<boolean>('get_admin_status').catch(() => true)
+  const [warning, admin] = await Promise.all([warningPromise, adminPromise])
+  configWarning.value = warning
+  isAdmin.value = admin
 })
 </script>
 
@@ -67,9 +88,19 @@ onMounted(async () => {
     >
       <span class="status-icon">{{ isAdmin ? '✓' : '!' }}</span>
       <span class="status-text">
-        {{ isAdmin ? '管理员权限已授予' : '管理员权限受限，部分功能不可用' }}
+        {{ isAdmin ? '管理员权限已授予' : '管理员权限受限,部分功能不可用' }}
       </span>
+      <button
+        v-if="!isAdmin"
+        type="button"
+        class="restart-btn"
+        :disabled="isRestarting"
+        @click="onRestartAsAdmin"
+      >
+        {{ isRestarting ? '正在重启...' : '以管理员身份重启' }}
+      </button>
     </div>
+    <p v-if="restartError" class="restart-error">{{ restartError }}</p>
 
     <!-- 驱动状态卡片 -->
     <div class="card driver-card">
@@ -180,6 +211,41 @@ onMounted(async () => {
   font-size: 10px;
   font-weight: 700;
   flex-shrink: 0;
+}
+
+/* 阶段 10：以管理员身份重启按钮 — 仅未授权时出现 */
+.restart-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--warning);
+  color: var(--bg-primary);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  transition:
+    background var(--transition-fast) var(--ease-default),
+    transform var(--transition-fast) var(--ease-default);
+}
+
+.restart-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.restart-btn:active:not(:disabled) {
+  background: var(--accent-pressed);
+  transform: translateY(1px);
+}
+
+.restart-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.restart-error {
+  margin: -4px 0 0;
+  font-size: 11px;
+  color: var(--danger);
 }
 
 /* 卡片通用 */
