@@ -240,8 +240,9 @@ fn handle_stop_hotkey(app: &AppHandle, _shortcut: &Shortcut) {
 
 /// 更新热键配置 — DESIGN 6.2
 ///
-/// 流程：对比变化 → 注销旧热键 → 校验冲突 → 注册新热键 → 持久化。
+/// 流程：对比变化 → 校验冲突 → 注销旧热键 → 注册新热键 → 持久化。
 /// 注册失败时保留旧热键注册状态。
+/// 采用"先全部注销，后全部注册"策略，避免启动键=停止键时的重复注销问题。
 pub fn update_hotkeys(
     app: &AppHandle,
     state: &SharedState,
@@ -304,102 +305,127 @@ pub fn update_hotkeys(
         });
     }
 
-    // 注销旧热键
-    unregister_hotkeys(app, &old_hotkeys)?;
-
-    // 注册新热键
-    match register_hotkeys(app, &new_hotkeys) {
-        Ok(_) => {
-            // 注册成功，持久化
-            let mut updated_config = {
-                let app_state = state
-                    .lock()
-                    .map_err(|e| format!("Failed to lock state: {}", e))?;
-                app_state.config.clone()
-            };
-            updated_config.hotkeys = new_hotkeys.clone();
-
-            match crate::config::save(&updated_config) {
-                Ok(_) => {
-                    // 持久化成功，更新内存
-                    let mut app_state = state
-                        .lock()
-                        .map_err(|e| format!("Failed to lock state: {}", e))?;
-                    app_state.config.hotkeys = new_hotkeys;
-
-                    Ok(HotkeyUpdateResult {
-                        changed: true,
-                        registered: true,
-                        persisted: true,
-                        message: None,
-                    })
-                }
-                Err(e) => {
-                    warn!("[hotkeys] persisted failed: {}, keeping in-memory only", e);
-                    // 持久化失败但注册成功，内存保持新热键
-                    let mut app_state = state
-                        .lock()
-                        .map_err(|e| format!("Failed to lock state: {}", e))?;
-                    app_state.config.hotkeys = new_hotkeys;
-
-                    Ok(HotkeyUpdateResult {
-                        changed: true,
-                        registered: true,
-                        persisted: false,
-                        message: Some(e),
-                    })
-                }
-            }
+    // 1. 先注销所有旧热键（使用 HashSet 去重，避免同一个键注销两次）
+    let old_codes = {
+        let mut set = HashSet::new();
+        if let Some(old_start_code) = scan_code_to_code(old_hotkeys.start.scan_code) {
+            set.insert(old_start_code);
         }
-        Err(e) => {
+        if let Some(old_stop_code) = scan_code_to_code(old_hotkeys.stop.scan_code) {
+            set.insert(old_stop_code);
+        }
+        set
+    };
+
+    for code in old_codes {
+        let shortcut = Shortcut::new(None, code);
+        if let Err(e) = app.global_shortcut().unregister(shortcut) {
+            warn!("[hotkeys] failed to unregister old hotkey {:?}: {}", code, e);
+            // 不阻塞流程，继续注销其他键
+        }
+    }
+
+    // 2. 注册新热键（使用 HashSet 去重，避免启动键=停止键时重复注册）
+    let new_start_code = scan_code_to_code(new_hotkeys.start.scan_code).ok_or_else(|| {
+        format!(
+            "Unsupported start key scan code: {}",
+            new_hotkeys.start.scan_code
+        )
+    })?;
+    let new_stop_code = scan_code_to_code(new_hotkeys.stop.scan_code).ok_or_else(|| {
+        format!(
+            "Unsupported stop key scan code: {}",
+            new_hotkeys.stop.scan_code
+        )
+    })?;
+
+    let mut registered_codes = HashSet::new();
+
+    // 注册启动热键
+    if !registered_codes.contains(&new_start_code) {
+        let start_shortcut = Shortcut::new(None, new_start_code);
+        let app_for_start = app.clone();
+        if let Err(e) = app.global_shortcut().on_shortcut(start_shortcut, move |_app, shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                handle_start_hotkey(&app_for_start, shortcut);
+            }
+        }) {
             // 注册失败，恢复旧热键
-            error!(
-                "[hotkeys] registration failed: {}, restoring old hotkeys",
-                e
-            );
+            error!("[hotkeys] failed to register start hotkey: {}", e);
             if let Err(restore_err) = register_hotkeys(app, &old_hotkeys) {
                 error!("[hotkeys] failed to restore old hotkeys: {}", restore_err);
             }
+            return Ok(HotkeyUpdateResult {
+                changed: true,
+                registered: false,
+                persisted: false,
+                message: Some(format!("启动热键注册失败: {}", e)),
+            });
+        }
+        registered_codes.insert(new_start_code);
+    }
+
+    // 注册停止热键（如果与启动热键相同，则跳过）
+    if !registered_codes.contains(&new_stop_code) {
+        let stop_shortcut = Shortcut::new(None, new_stop_code);
+        let app_for_stop = app.clone();
+        if let Err(e) = app.global_shortcut().on_shortcut(stop_shortcut, move |_app, shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                handle_stop_hotkey(&app_for_stop, shortcut);
+            }
+        }) {
+            // 注册失败，恢复旧热键
+            error!("[hotkeys] failed to register stop hotkey: {}", e);
+            if let Err(restore_err) = register_hotkeys(app, &old_hotkeys) {
+                error!("[hotkeys] failed to restore old hotkeys: {}", restore_err);
+            }
+            return Ok(HotkeyUpdateResult {
+                changed: true,
+                registered: false,
+                persisted: false,
+                message: Some(format!("停止热键注册失败: {}", e)),
+            });
+        }
+    }
+
+    // 3. 持久化
+    let mut updated_config = {
+        let app_state = state
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        app_state.config.clone()
+    };
+    updated_config.hotkeys = new_hotkeys.clone();
+
+    match crate::config::save(&updated_config) {
+        Ok(_) => {
+            // 持久化成功，更新内存
+            let mut app_state = state
+                .lock()
+                .map_err(|e| format!("Failed to lock state: {}", e))?;
+            app_state.config.hotkeys = new_hotkeys;
 
             Ok(HotkeyUpdateResult {
                 changed: true,
-                registered: false,
+                registered: true,
+                persisted: true,
+                message: None,
+            })
+        }
+        Err(e) => {
+            warn!("[hotkeys] persisted failed: {}, keeping in-memory only", e);
+            // 持久化失败但注册成功，内存保持新热键
+            let mut app_state = state
+                .lock()
+                .map_err(|e| format!("Failed to lock state: {}", e))?;
+            app_state.config.hotkeys = new_hotkeys;
+
+            Ok(HotkeyUpdateResult {
+                changed: true,
+                registered: true,
                 persisted: false,
                 message: Some(e),
             })
         }
     }
-}
-
-/// 注销指定热键配置
-fn unregister_hotkeys(app: &AppHandle, hotkeys: &HotkeyConfig) -> Result<(), String> {
-    let start_code = scan_code_to_code(hotkeys.start.scan_code).ok_or_else(|| {
-        format!(
-            "Unsupported start key scan code: {}",
-            hotkeys.start.scan_code
-        )
-    })?;
-    let stop_code = scan_code_to_code(hotkeys.stop.scan_code)
-        .ok_or_else(|| format!("Unsupported stop key scan code: {}", hotkeys.stop.scan_code))?;
-
-    info!(
-        "[hotkeys] unregistering: start={:?}, stop={:?}",
-        start_code, stop_code
-    );
-
-    // 注销启动热键
-    let start_shortcut = Shortcut::new(None, start_code);
-    if let Err(e) = app.global_shortcut().unregister(start_shortcut) {
-        warn!("[hotkeys] failed to unregister start hotkey: {}", e);
-    }
-
-    // 注销停止热键（如果与启动热键不同）
-    if start_code != stop_code {
-        let stop_shortcut = Shortcut::new(None, stop_code);
-        if let Err(e) = app.global_shortcut().unregister(stop_shortcut) {
-            warn!("[hotkeys] failed to unregister stop hotkey: {}", e);
-        }
-    }
-
-    Ok(())
 }
