@@ -7,8 +7,10 @@
 //
 // 安装策略：
 //   定位 <exe_dir>/drivers/interception/install-interception.exe
-//   通过 ShellExecuteW("runas") 以管理员身份静默调用 `/install` 参数
-//   安装完成后返回 InstalledNeedReboot
+//   通过 ShellExecuteExW("runas") 以管理员身份静默调用 `/install` 参数，
+//   并 WaitForSingleObject 等待安装器进程退出后再返回（否则注册表尚未写完，
+//   后续 check_interception_driver() 会误判为 NotInstalled）。
+//   安装完成后由 check_interception_driver() 检测得 InstalledNeedReboot。
 //
 // 阶段 13 接入 interception crate 后，改为先尝试 create_context()，
 // 成功则 Ready，失败再走注册表判断 InstalledNeedReboot vs NotInstalled。
@@ -39,6 +41,20 @@ pub fn install_driver() -> Result<(), String> {
     #[cfg(not(windows))]
     {
         Err("Driver installation is only supported on Windows".to_string())
+    }
+}
+
+/// 触发系统重启 — 驱动安装后需重启才会加载
+///
+/// 通过 `shutdown /r /t 0` 立即重启。需管理员权限（调用方已校验）。
+pub fn reboot_system() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        reboot_system_windows()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Reboot is only supported on Windows".to_string())
     }
 }
 
@@ -85,7 +101,13 @@ fn check_driver_windows() -> DriverStatus {
 
 #[cfg(windows)]
 fn install_driver_windows() -> Result<(), String> {
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        WaitForSingleObject, INFINITE,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     let exe_dir = std::env::current_exe()
@@ -110,30 +132,68 @@ fn install_driver_windows() -> Result<(), String> {
     let file = encode_wide(&installer_path.to_string_lossy());
     let params = encode_wide("/install");
 
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            verb.as_ptr(),
-            file.as_ptr(),
-            params.as_ptr(),
-            std::ptr::null(),
-            SW_HIDE as i32,
-        )
-    };
+    // 用 ShellExecuteExW 而非 ShellExecuteW：
+    // 后者是「启动即返回」，安装器还没写完注册表我们就检测 → 永远是 NotInstalled。
+    // SEE_MASK_NOCLOSEPROCESS 让 hProcess 填入安装器进程句柄，
+    // 配合 WaitForSingleObject 等其真正退出后再返回，确保后续检测拿到正确状态。
+    let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = verb.as_ptr();
+    sei.lpFile = file.as_ptr();
+    sei.lpParameters = params.as_ptr();
+    sei.nShow = SW_HIDE as i32;
 
-    // ShellExecuteW 返回 > 32 表示成功
-    let result_code = result as isize;
-    if result_code > 32 {
-        log::info!("[driver] installer launched successfully via runas");
+    let ok = unsafe { ShellExecuteExW(&mut sei) };
+    if ok == 0 {
+        // 调度失败（用户拒绝 UAC 时 GetLastError == ERROR_CANCELLED 1223）
+        let err_msg = "ShellExecuteExW failed (user may have declined UAC)".to_string();
+        log::error!("[driver] {}", err_msg);
+        return Err(err_msg);
+    }
+
+    if sei.hProcess.is_null() {
+        // 极少数情况句柄为空，无法等待，退化为「已调度但状态未知」
+        log::warn!("[driver] installer launched but no process handle to wait on");
+        return Ok(());
+    }
+
+    // 阻塞等待安装器进程退出（INFINITE）。该命令在独立线程中执行，
+    // 不会卡住 Tauri 主线程；前端通过 isInstalling 显示「正在安装...」。
+    let wait = unsafe { WaitForSingleObject(sei.hProcess, INFINITE) };
+    unsafe { CloseHandle(sei.hProcess) };
+
+    if wait == WAIT_OBJECT_0 {
+        log::info!("[driver] installer process exited, installation complete");
         Ok(())
     } else {
-        let err_msg = format!(
-            "ShellExecuteW failed with code {} (user may have declined UAC)",
-            result_code
-        );
+        let err_msg = format!("WaitForSingleObject returned unexpected code {}", wait);
         log::error!("[driver] {}", err_msg);
         Err(err_msg)
     }
+}
+
+/// 触发系统重启 — Windows 实现，调用 `shutdown /r /t 0`
+#[cfg(windows)]
+fn reboot_system_windows() -> Result<(), String> {
+    use std::process::Command;
+    use std::os::windows::process::CommandExt;
+
+    // CREATE_NO_WINDOW (0x08000000) 避免弹出黑色控制台窗口
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    Command::new("shutdown")
+        .args(["/r", "/t", "0"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| {
+            let msg = format!("Failed to invoke shutdown: {}", e);
+            log::error!("[driver] {}", msg);
+            msg
+        })?;
+
+    log::info!("[driver] reboot command dispatched");
+    Ok(())
 }
 
 /// 将 Rust 字符串编码为 null 结尾的 UTF-16 宽字符序列

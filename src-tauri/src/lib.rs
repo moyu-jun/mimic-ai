@@ -76,8 +76,16 @@ fn check_driver_status(state: tauri::State<SharedState>) -> Result<String, Strin
 ///
 /// 通过 ShellExecuteW("runas") 以管理员身份调用外置安装器。
 /// 成功调度后返回 Ok，调用方应重新调 check_driver_status 刷新。
+///
+/// 前置条件：必须以管理员权限运行（否则返回 Err 提示用户重启）。
 #[tauri::command]
 fn install_interception_driver(state: tauri::State<SharedState>) -> Result<(), String> {
+    // 权限守卫 — 驱动安装必须管理员权限（阶段 11 遗漏修复）
+    if !admin::is_admin() {
+        log::warn!("[install_driver] rejected: not running as admin");
+        return Err("permission_denied".to_string());
+    }
+
     // 运行态守卫 — DESIGN 6.1
     {
         let app_state = state
@@ -102,6 +110,19 @@ fn install_interception_driver(state: tauri::State<SharedState>) -> Result<(), S
     }
 
     Ok(())
+}
+
+/// 重启系统 — 驱动安装后需重启加载（阶段 11 优化）
+///
+/// 需管理员权限；非管理员返回 `permission_denied`。
+#[tauri::command]
+fn reboot_system() -> Result<(), String> {
+    if !admin::is_admin() {
+        log::warn!("[reboot] rejected: not running as admin");
+        return Err("permission_denied".to_string());
+    }
+    log::info!("[reboot] user requested system reboot");
+    driver::reboot_system()
 }
 
 /// 以管理员身份重启自身 — DESIGN 14.1 / 阶段 10
@@ -230,6 +251,7 @@ pub fn run() {
             request_admin_restart,
             check_driver_status,
             install_interception_driver,
+            reboot_system,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

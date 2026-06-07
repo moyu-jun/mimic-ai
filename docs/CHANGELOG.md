@@ -608,5 +608,47 @@
 - **`driver_status_changed` 事件未实现**：TASKS 阶段 11 任务 2 提到该事件，当前阶段仅由前端 `onMounted` 主动查询 + 安装后重新查询覆盖。事件推送留待阶段 12 统一事件机制时补齐。
 - **驱动文件尚未放入**：`drivers/interception/` 目录仅有 README 占位，待确认事项 #4 完成后填入实际文件。
 - **安装完成后未弹窗提示重启**：TASKS 描述"安装完成后弹窗提示重启电脑"，当前实现在前端仅切换状态到 `InstalledNeedReboot`（卡片显示"驱动已安装，需重启系统"）。如需系统级弹窗可在阶段 16 打磨时补充 `tauri::api::dialog`。
+- **权限守卫遗漏**（同日修复）：初始实现 `install_interception_driver` 未检查管理员权限，非管理员用户点击安装时直接调 `ShellExecuteW("runas")` 会弹 UAC 但安装器可能因权限不足静默失败。修复：命令入口增加 `if !admin::is_admin() { return Err("permission_denied") }`，前端捕获后提示「权限不足，请点击上方「以管理员身份重启」按钮」。
 - 实机验证（注册表路径是否匹配真实 Interception 安装、安装器 `/install` 参数是否正确）需阶段 16 实机复核。
+
+### 后续修复（同日）
+
+**问题**：用户报告「当用户没有以管理员权限启动，且当前未安装驱动时，点击安装驱动按钮应优先提醒权限不足」。
+
+**改动**：
+- [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) `install_interception_driver` 命令入口增加 `if !admin::is_admin()` 守卫，权限不足时返回 `Err("permission_denied")`（在运行态守卫之前）。
+- [src/pages/HomePage.vue](../src/pages/HomePage.vue) `onInstallDriver` catch 块优先匹配 `permission_denied`，显示「权限不足，请点击上方「以管理员身份重启」按钮」。
+
+**验证**：`cargo check` 通过（3.20s），`npm run build` 通过（52 模块）。
+
+### 后续优化（同日）— 安装时序修复 + 重启按钮
+
+**问题 1（时序 bug）**：实机测试发现第一次点击安装驱动，日志显示安装成功，但界面文字和按钮不变；再次点击后界面才更新为已安装状态。
+
+**根因**：`ShellExecuteW("runas")` 是「启动即返回」语义——安装器进程刚启动（还没写完注册表）该函数就返回 >32 视为成功，后端紧接着调 `check_interception_driver()` 查注册表时服务项尚未写入，误判 `NotInstalled`。第二次点击时，第一次的安装器早已完成、注册表已写入，于是检测到 `InstalledNeedReboot`。
+
+**修复**：`ShellExecuteW` → `ShellExecuteExW`（`SEE_MASK_NOCLOSEPROCESS` 取得进程句柄）+ `WaitForSingleObject(hProcess, INFINITE)`，阻塞等待安装器进程真正退出后再返回。命令在 Tauri 独立线程执行，不卡主线程；前端 `isInstalling` 显示「正在安装...」。
+
+**问题 2（需求）**：安装成功后按钮仍是「安装驱动」，但刚装完必然需要重启，按钮语义应变化。
+
+**改动**：
+
+| 文件 | 改动 |
+|------|------|
+| [src-tauri/src/driver.rs](../src-tauri/src/driver.rs) | `install_driver_windows` 改用 `ShellExecuteExW` + `WaitForSingleObject`；新增 `reboot_system()` / `reboot_system_windows()`（`shutdown /r /t 0`，`CREATE_NO_WINDOW` 隐藏控制台） |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 新增 `reboot_system` 命令（含 `admin::is_admin()` 守卫），注册到 `invoke_handler` |
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 新增 `isRebooting` 状态与 `onReboot` 处理；`InstalledNeedReboot` 状态下「安装驱动」按钮变为「重启电脑」（`.reboot-btn` 警告色），点击调 `reboot_system` |
+
+**关键决策**：
+- **`WaitForSingleObject(INFINITE)` 而非轮询**：安装器执行时间不定，无限等待最可靠；Tauri command 默认在独立线程池执行，阻塞不影响 UI 响应。
+- **`reboot_system` 复用 `permission_denied` 约定**：与 `install_interception_driver` 一致，前端统一捕获处理。
+- **重启用 `shutdown /r /t 0` 而非 Win32 `ExitWindowsEx`**：后者需要先 `AdjustTokenPrivileges` 提权 `SE_SHUTDOWN_NAME`，`shutdown.exe` 已封装这套逻辑，代码更简单（KISS）。
+
+**验证**：`cargo check` 通过（6.00s，无 warning），`npm run build` 通过（52 模块，CSS 18.61 kB / JS 98.20 kB，无 TS 错误）。
+
+**遗留**：
+- `reboot_system_windows` 实机重启行为需阶段 16 实机验证。
+- 重启前未做「确认对话框」二次确认，点击即重启。如需防误触可在阶段 16 加 `confirm()` 或 Tauri dialog。
+
+
 

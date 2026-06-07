@@ -31,6 +31,7 @@ const restartError = ref<string | null>(null)
 const driverStatus = ref<DriverStatus>('NotInstalled')
 const isInstalling = ref(false)
 const installError = ref<string | null>(null)
+const isRebooting = ref(false)
 
 async function onRestartAsAdmin(): Promise<void> {
   if (isRestarting.value) return
@@ -58,11 +59,14 @@ async function onInstallDriver(): Promise<void> {
     const status = await invoke<string>('check_driver_status')
     driverStatus.value = JSON.parse(status) as DriverStatus
   } catch (err) {
-    installError.value = String(err).includes('declined')
-      ? '已取消安装'
-      : String(err).includes('not found')
-        ? '安装程序不存在，请检查 drivers 目录'
-        : '安装失败，请稍后重试'
+    const errStr = String(err)
+    installError.value = errStr.includes('permission_denied')
+      ? '权限不足，请点击上方「以管理员身份重启」按钮'
+      : errStr.includes('declined')
+        ? '已取消安装'
+        : errStr.includes('not found')
+          ? '安装程序不存在，请检查 drivers 目录'
+          : '安装失败，请稍后重试'
     log_error('[HomePage] install driver failed:', err)
   } finally {
     isInstalling.value = false
@@ -71,6 +75,22 @@ async function onInstallDriver(): Promise<void> {
 
 function log_error(msg: string, err: unknown): void {
   console.error(msg, err)
+}
+
+async function onReboot(): Promise<void> {
+  if (isRebooting.value) return
+  isRebooting.value = true
+  installError.value = null
+  try {
+    await invoke('reboot_system')
+    // 系统即将重启，前端无需后续处理
+  } catch (err) {
+    isRebooting.value = false
+    installError.value = String(err).includes('permission_denied')
+      ? '权限不足，请点击上方「以管理员身份重启」按钮'
+      : '重启失败，请手动重启电脑'
+    log_error('[HomePage] reboot failed:', err)
+  }
 }
 
 // === 阶段 7 mock：模拟运行切换 ===
@@ -160,6 +180,15 @@ onMounted(async () => {
         @click="onInstallDriver"
       >
         {{ isInstalling ? '正在安装...' : '安装驱动' }}
+      </button>
+      <button
+        v-else-if="driverStatus === 'InstalledNeedReboot'"
+        type="button"
+        class="install-btn reboot-btn"
+        :disabled="isRebooting"
+        @click="onReboot"
+      >
+        {{ isRebooting ? '正在重启...' : '重启电脑' }}
       </button>
     </div>
     <p v-if="installError" class="install-error">{{ installError }}</p>
@@ -373,6 +402,21 @@ onMounted(async () => {
 .install-btn:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
+}
+
+.install-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 重启电脑按钮 — 警告色，提示这是系统级操作 */
+.install-btn.reboot-btn {
+  background: var(--warning);
+  color: var(--bg-primary);
+}
+
+.install-btn.reboot-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--warning) 85%, white);
 }
 
 /* 热键概览 */
