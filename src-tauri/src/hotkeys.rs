@@ -87,10 +87,13 @@ fn scan_code_to_code(scan_code: u16) -> Option<Code> {
         15 => Some(Code::Tab),
         1 => Some(Code::Escape),
         // Shift/Ctrl/Alt
+        // 注意：前端 keyMap.ts 中 Right Ctrl/Alt 的 scanCode 与 Left 相同（都是 29/56）
+        // 这是因为 Windows 键盘扫描码在基础层不区分左右，需要通过扩展码（E0）区分
+        // 但全局热键注册时统一使用 Left 版本，实际左右键都能触发
         42 => Some(Code::ShiftLeft),
         54 => Some(Code::ShiftRight),
-        29 => Some(Code::ControlLeft),
-        56 => Some(Code::AltLeft),
+        29 => Some(Code::ControlLeft),  // Left Ctrl 和 Right Ctrl 都映射到这里
+        56 => Some(Code::AltLeft),      // Left Alt 和 Right Alt 都映射到这里
         _ => None,
     }
 }
@@ -352,11 +355,19 @@ pub fn update_hotkeys(
         }) {
             // 注册失败，直接返回错误，不回滚
             error!("[hotkeys] failed to register start hotkey: {}", e);
+
+            // F12 特殊提示（常见的系统保留键）
+            let hint = if new_hotkeys.start.key_label == "F12" {
+                "启动热键注册失败。F12 通常被系统或开发者工具占用，建议更换为 F9、F10 或 F11。"
+            } else {
+                &format!("启动热键注册失败: {}。该键可能被其他程序占用，请更换其他按键。", e)
+            };
+
             return Ok(HotkeyUpdateResult {
                 changed: true,
                 registered: false,
                 persisted: false,
-                message: Some(format!("启动热键注册失败: {}。旧热键已注销，请重试或更换其他按键。", e)),
+                message: Some(hint.to_string()),
             });
         }
         registered_codes.insert(new_start_code);
@@ -373,11 +384,19 @@ pub fn update_hotkeys(
         }) {
             // 注册失败，直接返回错误，不回滚
             error!("[hotkeys] failed to register stop hotkey: {}", e);
+
+            // F12 特殊提示（常见的系统保留键）
+            let hint = if new_hotkeys.stop.key_label == "F12" {
+                "停止热键注册失败。F12 通常被系统或开发者工具占用，建议更换为 F9、F10 或 F11。启动热键已注册成功。"
+            } else {
+                &format!("停止热键注册失败: {}。该键可能被其他程序占用，请更换其他按键。启动热键已注册成功。", e)
+            };
+
             return Ok(HotkeyUpdateResult {
                 changed: true,
                 registered: false,
                 persisted: false,
-                message: Some(format!("停止热键注册失败: {}。启动热键已注册成功，请重试或更换其他按键。", e)),
+                message: Some(hint.to_string()),
             });
         }
         registered_codes.insert(new_stop_code);
