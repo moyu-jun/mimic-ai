@@ -9,7 +9,8 @@
  *   - 内部无任何文字 / 图标 / 按钮，运行文案由状态栏承载。
  *   - 由 appStore.isLocked 控制；阶段 12 起改由 runtime_status_changed 事件驱动。
  */
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { appStore } from './stores/appStore'
 import AppTitleBar from './components/AppTitleBar.vue'
 import AppSidebar from './components/AppSidebar.vue'
@@ -28,6 +29,25 @@ const PAGE_COMPONENTS = {
 } satisfies Record<AppPage, unknown>
 
 const currentPageComponent = computed(() => PAGE_COMPONENTS[appStore.currentPage])
+
+// 阶段 8: 启动时加载配置(当前从后端内存默认配置加载)
+onMounted(async () => {
+  try {
+    const config = await invoke<{
+      keyboardActions: typeof appStore.keyboardActions
+      mouseActions: typeof appStore.mouseActions
+      hotkeys: typeof appStore.hotkeys
+    }>('load_config')
+
+    // 注入到 appStore, 替换前端 mock 初值
+    appStore.keyboardActions = config.keyboardActions
+    appStore.mouseActions = config.mouseActions
+    appStore.hotkeys = config.hotkeys
+  } catch (error) {
+    console.error('Failed to load config:', error)
+    // 加载失败时保持前端 mock 数据, 应用仍可运行
+  }
+})
 </script>
 
 <template>

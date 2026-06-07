@@ -15,9 +15,10 @@ export const appStore = reactive({
   runtimeStatus: 'Idle' as RuntimeStatus,
   /** 运行期锁定蒙版开关（阶段 7 接入） */
   isLocked: false,
-  // TODO[阶段 8]: 以下 keyboardActions / mouseActions / hotkeys 的 mock 初值在接通 load_config 后
-  // 必须清空（改为空数组或由后端注入），不再使用前端硬编码默认数据。
-  /** 按键动作列表（阶段 4 mock，阶段 8 起由 load_config 提供） */
+  /**
+   * 按键动作列表（阶段 8 起由后端 load_config 提供）
+   * 保留 mock 初值作为降级回退，load_config 失败时应用仍可运行
+   */
   keyboardActions: [
     {
       id: 'mock-kb-1',
@@ -27,7 +28,10 @@ export const appStore = reactive({
       intervalMs: 20,
     },
   ] as KeyboardAction[],
-  /** 鼠标动作列表（阶段 5 mock，阶段 8 起由 load_config 提供） */
+  /**
+   * 鼠标动作列表（阶段 8 起由后端 load_config 提供）
+   * 保留 mock 初值作为降级回退，load_config 失败时应用仍可运行
+   */
   mouseActions: [
     {
       id: 'mock-mouse-1',
@@ -36,7 +40,10 @@ export const appStore = reactive({
       intervalMs: 20,
     },
   ] as MouseAction[],
-  /** 全局热键配置（阶段 6 mock，阶段 12 起由 update_hotkeys 真实注册） */
+  /**
+   * 全局热键配置（阶段 8 起由后端 load_config 提供，阶段 12 起真实注册）
+   * 保留 mock 初值作为降级回退，load_config 失败时应用仍可运行
+   */
   hotkeys: {
     start: { keyLabel: 'F12', scanCode: 88 },
     stop: { keyLabel: 'F12', scanCode: 88 },

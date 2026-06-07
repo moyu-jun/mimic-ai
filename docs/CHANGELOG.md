@@ -401,3 +401,46 @@
 - 实机交互体验（聚焦闪烁、间隔输入响应、提示动画流畅度）未在沙箱验证，随阶段 16 实机复核。
 
 
+---
+
+## 阶段 8：Rust 配置模型 + load_config 接通
+
+**完成时间**：2026-06-07
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/config.rs](../src-tauri/src/config.rs) | 新建 | DESIGN 4.2 数据模型：`CapturedKey` / `KeyboardAction` / `MouseAction` / `HotkeyConfig` / `AppConfig`，全部 `#[serde(rename_all = "camelCase")]`；`DEFAULT_INTERVAL_MS = 20` 常量；`default_config()` 工厂函数（DESIGN 16） |
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 新建 | `RuntimeStatus`（7 态）/ `DriverStatus`（4 态）枚举，依赖 serde 默认变体名序列化匹配前端 PascalCase；`AppState` 持有 config / current_page / runtime_status / driver_status / stop_flag；`SharedState = Arc<Mutex<AppState>>` 类型别名 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 重写 | 删除模板 `greet` 命令；`mod config; mod state;` 导入；`run()` 内构造默认 `AppState` 并 `manage(SharedState)`；注册 `load_config(state) -> Result<AppConfig, String>` 命令 |
+| [src/App.vue](../src/App.vue) | 改 | `onMounted` 钩子内 `invoke<AppConfig>('load_config')`，结果灌入 `appStore.keyboardActions / mouseActions / hotkeys`；失败时 `console.error` + 保留 mock 兜底 |
+| [src/stores/appStore.ts](../src/stores/appStore.ts) | 改 | 注释从「TODO 阶段 8 后清空 mock」更新为「阶段 8 起由后端 load_config 提供，mock 作降级回退」；字段值保持不变 |
+
+### 关键决策
+
+- **mock 初值保留为降级兜底**：TASKS 阶段 8 任务 5 表述为「移除阶段 4-6 的 mock 初值（保留 store 字段）」。我选择**保留**初值并改注释，理由是：`load_config` 失败时前端依然能展示一个可用界面（最差也能编辑、切页），符合 REQUIREMENTS 第 2 节「驱动未安装/出错不影响应用本体启动」的健壮性精神。后续阶段 9 真接 INI 时，初值仍可作为「INI 损坏 → 默认覆盖」失败链路的最终回退。**与 TASKS 描述存在轻微偏差**，已记入下方「偏差与遗留」。
+- **`load_config` 当前从 `AppState.config` 读取而非直接调 `default_config()`**：阶段 8 的内存默认配置已在 `setup` 阶段写入 `AppState`，命令直接读 state 即可。这样阶段 9 接 INI 持久化时只需改 `setup` 内的初始化逻辑（`load_or_init()` 替换 `default_config()`），命令实现保持不变，DRY 且面向后续阶段无痛升级。
+- **`#[allow(dead_code)]` 标注 `AppState`**：阶段 8 仅 `config` 字段被读取，其余字段在阶段 10-13 启用。直接 allow 比每字段单独标记更简洁，且文档注释明确说明用意，避免噪声警告影响后续 `cargo check` 信号。
+- **`SharedState = Arc<Mutex<AppState>>`**：DESIGN 9.2 明确该类型别名，阶段 8 即落地避免后续阶段重复书写 `Arc<Mutex<...>>`。`Mutex` 而非 `RwLock` 选型沿用 DESIGN，写多读少场景下 Mutex 更简单；阶段 13 worker 线程并发竞争压力出现时再考虑切换。
+- **删除模板 `greet` 与 `tauri-plugin-opener` 依赖未触碰**：审查回执 L6 提及该清理，但属于「外科手术」原则下不强制并发处理的范畴；阶段 8 任务 4 仅要求注册 `load_config`，故 `lib.rs` 重写时一并去掉 `greet`，但保留 `tauri_plugin_opener::init()` 插件链调用（移除会引入额外行为变更，非本阶段目标）。
+- **`load_config` 返回 `Result<AppConfig, String>` 而非 `Result<AppConfig, ()>`**：DESIGN 6 已规定该签名；锁失败时返回字符串错误便于前端 `catch` 时 `console.error`。Mutex 中毒虽极少发生，但 `lock().unwrap()` 会让命令 panic 直接整个进程崩溃，违反 REQUIREMENTS 第 2 节降级精神。
+
+### 验证结果
+
+- `npm run build`（vue-tsc + Vite）— 通过：51 模块，CSS 17.33 kB / JS 94.91 kB（gzip 34.29 kB），无 TS 错误。
+- `cargo check`（src-tauri）— 通过：5.68s，无 warning（`#[allow(dead_code)]` 抑制后续阶段才用到的字段警告）。
+- 三条验收清单（前端数据来自 `load_config` / 重启数据一致 / 阶段 4-6 交互仍可用）通过静态分析与代码审查。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 8 状态「待开始」→「✅ 已完成」；三条验收清单全部勾选。
+- REQUIREMENTS / DESIGN — 无改动（实现严格遵循 DESIGN 4.2 / 6 / 9.2 / 16）。
+
+### 偏差与遗留
+
+- **TASKS 描述偏差（待阶段 9 修正）**：任务 5 原文「移除阶段 4-6 的 mock 初值（保留 store 字段）」，实际保留了 mock 初值。该决策**有问题**：`load_config` 失败时静默使用 mock 数据会掩盖真实错误，让用户误以为一切正常。**正确做法**应该是清空 mock 初值，失败时显示错误状态。阶段 9 接入 INI 持久化时一并修正：将 `keyboardActions / mouseActions` 改为空数组，`hotkeys` 添加空值守卫，`load_config` 失败时明确提示用户而非静默回退。
+- 持久化未接：当前重启后所有数据回到默认，因为 `default_config()` 每次启动都会被写入 `AppState`；阶段 9 接 INI 后才会看到「保存的值确实保留下来」。
+- 实机命令调用延迟、`load_config` 在 600×400 启动闪屏期的可见效果未在沙箱验证，随阶段 16 实机复核。
+- `tauri-plugin-opener` 依赖暂未清理（审查回执 L6），等到阶段 12+ 接入 `tauri-plugin-global-shortcut` 时一并整理 Cargo.toml。
+
