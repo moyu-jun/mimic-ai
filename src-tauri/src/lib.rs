@@ -8,10 +8,11 @@
 
 mod admin;
 mod config;
+mod driver;
 mod state;
 
 use config::AppConfig;
-use state::{AppState, DriverStatus, RuntimeStatus, SharedState};
+use state::{AppState, RuntimeStatus, SharedState};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -59,6 +60,48 @@ fn get_init_warning(state: tauri::State<SharedState>) -> Option<String> {
 #[tauri::command]
 fn get_admin_status() -> bool {
     admin::is_admin()
+}
+
+/// 检测 Interception 驱动状态 — DESIGN 12.2 / 阶段 11
+#[tauri::command]
+fn check_driver_status(state: tauri::State<SharedState>) -> Result<String, String> {
+    let app_state = state
+        .lock()
+        .map_err(|e| format!("Failed to lock state: {}", e))?;
+    Ok(serde_json::to_string(&app_state.driver_status)
+        .unwrap_or_else(|_| "\"NotInstalled\"".to_string()))
+}
+
+/// 安装 Interception 驱动 — DESIGN 12.3 / 阶段 11
+///
+/// 通过 ShellExecuteW("runas") 以管理员身份调用外置安装器。
+/// 成功调度后返回 Ok，调用方应重新调 check_driver_status 刷新。
+#[tauri::command]
+fn install_interception_driver(state: tauri::State<SharedState>) -> Result<(), String> {
+    // 运行态守卫 — DESIGN 6.1
+    {
+        let app_state = state
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard
+            | RuntimeStatus::RunningMouse
+            | RuntimeStatus::PickingMouse => {
+                return Err("busy: simulation running".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    driver::install_driver()?;
+
+    // 安装后重新检测并更新 state
+    let new_status = driver::check_interception_driver();
+    if let Ok(mut app_state) = state.lock() {
+        app_state.driver_status = new_status;
+    }
+
+    Ok(())
 }
 
 /// 以管理员身份重启自身 — DESIGN 14.1 / 阶段 10
@@ -160,12 +203,16 @@ pub fn run() {
             let admin = admin::is_admin();
             log::info!("[setup] admin status: {}", if admin { "elevated" } else { "limited" });
 
+            // 驱动检测 — DESIGN 13.1 步骤 3 / 阶段 11
+            let driver_status = driver::check_interception_driver();
+            log::info!("[setup] driver status: {:?}", driver_status);
+
             let initial_state = AppState {
                 config: loaded_config,
                 config_warning,
                 current_page: "home".to_string(),
                 runtime_status: RuntimeStatus::Idle,
-                driver_status: DriverStatus::NotInstalled,
+                driver_status,
                 stop_flag: Arc::new(AtomicBool::new(false)),
             };
 
@@ -181,6 +228,8 @@ pub fn run() {
             get_init_warning,
             get_admin_status,
             request_admin_restart,
+            check_driver_status,
+            install_interception_driver,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

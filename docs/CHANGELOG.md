@@ -562,3 +562,51 @@
 
 `cargo check` 验证通过：4.17s，无 warning。
 
+---
+
+## 阶段 11：驱动检测与安装
+
+**完成时间**：2026-06-07
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | windows-sys features 追加 `Win32_System_Registry` |
+| [src-tauri/src/driver.rs](../src-tauri/src/driver.rs) | 新建 | `check_interception_driver()` 注册表检测 + `install_driver()` ShellExecuteW("runas") 安装 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | `mod driver;` 导入；setup 内调用驱动检测并写入 state；注册 `check_driver_status` / `install_interception_driver` 命令 |
+| [src/types/config.ts](../src/types/config.ts) | 改 | 新增 `DriverStatus` 联合类型 |
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 改 | 驱动卡片接真实命令（`check_driver_status` / `install_interception_driver`）；四态视觉（灰/绿/橙/红）；安装中 loading 态 |
+| [drivers/interception/README.md](../drivers/interception/README.md) | 新建 | 占位说明，列明所需文件与安装命令 |
+
+### 关键决策
+
+- **注册表检测而非 `interception::create_context()`**：阶段 11 不引入 interception crate（阶段 13 才用），改为查 `HKLM\SYSTEM\CurrentControlSet\Services\keyboard` 与 `mouse` 注册表服务项。服务项存在 → `InstalledNeedReboot`（无法确认是否已加载），不存在 → `NotInstalled`。阶段 13 引入 crate 后改为先 `create_context()` 成功才返回 `Ready`。
+- **`check_driver_status` 返回 JSON 字符串而非直接 DriverStatus**：Tauri 2 的 `invoke` 返回的是序列化后的值；由于 `DriverStatus` 是枚举（serde 默认序列化为带引号的字符串如 `"NotInstalled"`），前端需要 `JSON.parse()` 来还原类型。这比自定义 serializer 更简单。
+- **安装器参数 `/install`**：Interception 官方安装器 `install-interception.exe` 接受 `/install` 参数进行静默安装。`SW_HIDE` 隐藏安装器窗口，避免干扰用户。
+- **安装后重新检测 + 更新 state**：`install_interception_driver` 命令调度安装器后立即重新跑 `check_interception_driver()` 并更新 `AppState.driver_status`，前端再调 `check_driver_status` 获取最新值。
+- **运行态守卫**：`install_interception_driver` 在 `RunningKeyboard` / `RunningMouse` / `PickingMouse` 时直接拒绝（DESIGN 6.1），与阶段 13 的 `save_config` 守卫一致。
+- **前端默认 `NotInstalled` + onMounted 覆盖**：与 `isAdmin` 同策略，避免首帧闪烁；默认灰色「未安装」是最安全的视觉状态。
+
+### 验证结果
+
+- `cargo check`（src-tauri）— 通过：2.50s，无 warning。
+- `npm run build`（vue-tsc + Vite）— 通过：52 模块，CSS 18.33 kB / JS 97.60 kB（gzip 35.28 kB），无 TS 错误。
+- 静态分析：
+  - `check_driver_status` / `install_interception_driver` 均注册在 `invoke_handler`；
+  - setup 内 `driver::check_interception_driver()` 结果写入 `AppState.driver_status`；
+  - 前端 `onMounted` 并行触发三项查询（warning / admin / driver）。
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 11 状态「待开始」→「✅ 已完成」。
+- REQUIREMENTS / DESIGN — 无改动（实现严格遵循 DESIGN 12.2 / 12.3）。
+
+### 偏差与遗留
+
+- **`check_driver_status` 当前无法区分 `InstalledNeedReboot` 与 `Ready`**：注册表检测只能判断"服务项存在"，无法确认驱动是否已加载到内核。阶段 13 引入 `interception` crate 后，先尝试 `create_context()` 成功则 `Ready`，失败再走注册表。
+- **`driver_status_changed` 事件未实现**：TASKS 阶段 11 任务 2 提到该事件，当前阶段仅由前端 `onMounted` 主动查询 + 安装后重新查询覆盖。事件推送留待阶段 12 统一事件机制时补齐。
+- **驱动文件尚未放入**：`drivers/interception/` 目录仅有 README 占位，待确认事项 #4 完成后填入实际文件。
+- **安装完成后未弹窗提示重启**：TASKS 描述"安装完成后弹窗提示重启电脑"，当前实现在前端仅切换状态到 `InstalledNeedReboot`（卡片显示"驱动已安装，需重启系统"）。如需系统级弹窗可在阶段 16 打磨时补充 `tauri::api::dialog`。
+- 实机验证（注册表路径是否匹配真实 Interception 安装、安装器 `/install` 参数是否正确）需阶段 16 实机复核。
+

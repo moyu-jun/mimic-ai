@@ -13,6 +13,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { appStore } from '../stores/appStore'
+import type { DriverStatus } from '../types/config'
 
 const APP_VERSION = '0.1.0'
 const APP_TAGLINE = 'Windows 按键与鼠标模拟工具'
@@ -25,6 +26,11 @@ const configWarning = ref<string | null>(null)
 const isAdmin = ref(true)
 const isRestarting = ref(false)
 const restartError = ref<string | null>(null)
+
+// 阶段 11：驱动状态（来自后端 check_driver_status）
+const driverStatus = ref<DriverStatus>('NotInstalled')
+const isInstalling = ref(false)
+const installError = ref<string | null>(null)
 
 async function onRestartAsAdmin(): Promise<void> {
   if (isRestarting.value) return
@@ -42,9 +48,29 @@ async function onRestartAsAdmin(): Promise<void> {
   }
 }
 
-function onInstallDriver(): void {
-  // 阶段 11 接 install_driver；当前为占位，点击无副作用。
-  console.log('[mock] install driver clicked')
+async function onInstallDriver(): Promise<void> {
+  if (isInstalling.value) return
+  isInstalling.value = true
+  installError.value = null
+  try {
+    await invoke('install_interception_driver')
+    // 安装器已启动，重新检测驱动状态
+    const status = await invoke<string>('check_driver_status')
+    driverStatus.value = JSON.parse(status) as DriverStatus
+  } catch (err) {
+    installError.value = String(err).includes('declined')
+      ? '已取消安装'
+      : String(err).includes('not found')
+        ? '安装程序不存在，请检查 drivers 目录'
+        : '安装失败，请稍后重试'
+    log_error('[HomePage] install driver failed:', err)
+  } finally {
+    isInstalling.value = false
+  }
+}
+
+function log_error(msg: string, err: unknown): void {
+  console.error(msg, err)
 }
 
 // === 阶段 7 mock：模拟运行切换 ===
@@ -64,9 +90,15 @@ onMounted(async () => {
   // 并行触发，任一失败不阻塞另一项
   const warningPromise = invoke<string | null>('get_init_warning').catch(() => null)
   const adminPromise = invoke<boolean>('get_admin_status').catch(() => true)
-  const [warning, admin] = await Promise.all([warningPromise, adminPromise])
+  const driverPromise = invoke<string>('check_driver_status').catch(() => '"NotInstalled"')
+  const [warning, admin, driverRaw] = await Promise.all([warningPromise, adminPromise, driverPromise])
   configWarning.value = warning
   isAdmin.value = admin
+  try {
+    driverStatus.value = JSON.parse(driverRaw) as DriverStatus
+  } catch {
+    driverStatus.value = 'NotInstalled'
+  }
 })
 </script>
 
@@ -105,13 +137,32 @@ onMounted(async () => {
     <!-- 驱动状态卡片 -->
     <div class="card driver-card">
       <div class="driver-info">
-        <span class="driver-dot"></span>
-        <span class="driver-text">驱动未安装</span>
+        <span
+          class="driver-dot"
+          :class="{
+            'dot-ready': driverStatus === 'Ready',
+            'dot-warn': driverStatus === 'InstalledNeedReboot',
+            'dot-error': driverStatus === 'Error',
+          }"
+        ></span>
+        <span class="driver-text">
+          {{ driverStatus === 'Ready' ? 'Interception 驱动已加载'
+           : driverStatus === 'InstalledNeedReboot' ? '驱动已安装，需重启系统'
+           : driverStatus === 'Error' ? '驱动错误'
+           : '驱动未安装' }}
+        </span>
       </div>
-      <button type="button" class="install-btn" @click="onInstallDriver">
-        安装驱动
+      <button
+        v-if="driverStatus === 'NotInstalled'"
+        type="button"
+        class="install-btn"
+        :disabled="isInstalling"
+        @click="onInstallDriver"
+      >
+        {{ isInstalling ? '正在安装...' : '安装驱动' }}
       </button>
     </div>
+    <p v-if="installError" class="install-error">{{ installError }}</p>
 
     <!-- 当前热键概览 -->
     <div class="card hotkey-card">
@@ -273,6 +324,24 @@ onMounted(async () => {
   height: 8px;
   border-radius: 50%;
   background: var(--text-disabled);
+}
+
+.driver-dot.dot-ready {
+  background: var(--success);
+}
+
+.driver-dot.dot-warn {
+  background: var(--warning);
+}
+
+.driver-dot.dot-error {
+  background: var(--danger);
+}
+
+.install-error {
+  margin: -4px 0 0;
+  font-size: 11px;
+  color: var(--danger);
 }
 
 .driver-text {

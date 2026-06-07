@@ -19,6 +19,13 @@ export type RuntimeStatus =
   | 'PickingMouse'
   | 'Error'
 
+/** Interception 驱动状态（DESIGN 12.2 / 阶段 11） */
+export type DriverStatus =
+  | 'NotInstalled'
+  | 'InstalledNeedReboot'
+  | 'Ready'
+  | 'Error'
+
 /** 按键捕获结果（DESIGN 8.1） */
 export interface CapturedKey {
   keyLabel: string
