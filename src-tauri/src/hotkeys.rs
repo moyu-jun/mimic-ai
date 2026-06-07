@@ -350,16 +350,13 @@ pub fn update_hotkeys(
                 handle_start_hotkey(&app_for_start, shortcut);
             }
         }) {
-            // 注册失败，恢复旧热键
+            // 注册失败，直接返回错误，不回滚
             error!("[hotkeys] failed to register start hotkey: {}", e);
-            if let Err(restore_err) = register_hotkeys(app, &old_hotkeys) {
-                error!("[hotkeys] failed to restore old hotkeys: {}", restore_err);
-            }
             return Ok(HotkeyUpdateResult {
                 changed: true,
                 registered: false,
                 persisted: false,
-                message: Some(format!("启动热键注册失败: {}", e)),
+                message: Some(format!("启动热键注册失败: {}。旧热键已注销，请重试或更换其他按键。", e)),
             });
         }
         registered_codes.insert(new_start_code);
@@ -374,18 +371,16 @@ pub fn update_hotkeys(
                 handle_stop_hotkey(&app_for_stop, shortcut);
             }
         }) {
-            // 注册失败，恢复旧热键
+            // 注册失败，直接返回错误，不回滚
             error!("[hotkeys] failed to register stop hotkey: {}", e);
-            if let Err(restore_err) = register_hotkeys(app, &old_hotkeys) {
-                error!("[hotkeys] failed to restore old hotkeys: {}", restore_err);
-            }
             return Ok(HotkeyUpdateResult {
                 changed: true,
                 registered: false,
                 persisted: false,
-                message: Some(format!("停止热键注册失败: {}", e)),
+                message: Some(format!("停止热键注册失败: {}。启动热键已注册成功，请重试或更换其他按键。", e)),
             });
         }
+        registered_codes.insert(new_stop_code);
     }
 
     // 3. 持久化
