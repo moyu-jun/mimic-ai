@@ -78,6 +78,8 @@ pub struct AppState {
     pub interception_worker: Arc<Mutex<Option<SendInterception>>>,
     /// 按键模拟事件发送器（阶段 13）— DESIGN 8.4
     pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
+    /// 鼠标模拟事件发送器（阶段 15）— DESIGN 10.2
+    pub mouse_tx: SyncSender<crate::mouse_worker::MouseEvent>,
 }
 
 /// 共享状态类型（Arc + Mutex 包装）

@@ -1338,3 +1338,38 @@ pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
 
 - 实机三项验收（窗口隐/显、坐标回填、状态栏"正在拾取"）依赖驱动已安装 + 实机环境，与阶段 16 一并复核
 - 拾取期间无取消机制（符合 DESIGN 11.2 设计约束，用户只能通过左键点击完成）
+
+## 阶段 15：鼠标点击模拟 worker
+
+**完成时间**：2026-06-08
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/mouse_worker.rs](../src-tauri/src/mouse_worker.rs) | 新建 | 与 keyboard_worker 镜像结构；`MouseEvent::Click { x, y }` → 绝对坐标归一化（GetSystemMetrics）→ Interception MouseStroke（MOVE_ABSOLUTE + LEFT_BUTTON_DOWN + LEFT_BUTTON_UP）；状态门控 RunningMouse；设备扫描 1-10 |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 | `handle_start_hotkey` 拆为 `handle_start_keyboard` + `handle_start_mouse`；mouse 分支过滤 null 坐标行，发 `MouseEvent::Click` 到 mouse channel；全部 null 时切回 ReadyMouse 并记录日志 |
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 改 | `AppState` 新增 `mouse_tx: SyncSender<MouseEvent>` 字段 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 引入 `mouse_worker` 模块；创建 mouse channel（容量 32）；`AppState` 初始化加 `mouse_tx`；启动 `mouse_worker::start_mouse_worker` |
+
+### 关键决策
+
+- **复用 worker_ctx**：鼠标 worker 与键盘 worker 共享同一个 `interception_worker` context（Arc<Mutex<>>），两者串行访问 Interception send 接口，无竞态。与键盘 worker 设计一致。
+- **绝对坐标归一化**：Interception 鼠标绝对坐标范围 0–65535，需除以屏幕分辨率归一化。用 `GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN)` 获取主显示器尺寸。多显示器/高 DPI 场景为阶段 16 待确认事项，不影响单显示器标准 DPI。
+- **全部 null 切 ReadyMouse 而非 Idle**：符合 TASKS 阶段 15 验收要求（"不报错，保持 ReadyMouse"），且语义更准确——用户仍在鼠标页面，随时可补充坐标再次启动。
+
+### 验证结果
+
+- `cargo check` — 通过，无 warning ✅
+- `cargo clippy` — 通过，无 warning ✅
+- `npm run build` — 52 模块，无类型错误 ✅
+- 实机验证（F12 循环点击、停止解锁）— ⏳ 待阶段 16 复核
+
+### 文档回写
+
+- [TASKS.md](./TASKS.md) 阶段 15 验收项目已更新状态
+
+### 偏差与遗留
+
+- 多显示器/高 DPI 坐标偏移：第一版仅支持单显示器标准 DPI（符合 REQUIREMENTS 3.8 第一版约束）
+- 鼠标 worker 与键盘 worker 共用 worker_ctx Mutex，理论上两者同时运行（RunningKeyboard + RunningMouse 同时不可能，状态机门控保证互斥）

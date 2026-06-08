@@ -13,11 +13,13 @@ mod hotkeys;
 mod hotkeys_interception;
 mod keyboard_worker;
 mod mouse_picker;
+mod mouse_worker;
 mod state;
 
 use config::AppConfig;
 use hotkeys::HotkeyUpdateResult;
 use keyboard_worker::ActionEvent;
+use mouse_worker::MouseEvent;
 use state::{AppState, RuntimeStatus, SendInterception, SharedState};
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
@@ -434,6 +436,9 @@ pub fn run() {
             // 使用有界通道（容量 32）防止生产者-消费者失衡时内存泄漏
             let (action_tx, action_rx) = mpsc::sync_channel::<ActionEvent>(32);
 
+            // 创建鼠标模拟 channel — DESIGN 10.2 / 阶段 15
+            let (mouse_tx, mouse_rx) = mpsc::sync_channel::<MouseEvent>(32);
+
             // 启动 Interception 热键监听线程 — DESIGN 8.3 / 阶段 13
             let shared_state: SharedState = Arc::new(Mutex::new(AppState {
                 config: loaded_config,
@@ -445,6 +450,7 @@ pub fn run() {
                 interception_listener: listener_ctx.clone(),
                 interception_worker: worker_ctx.clone(),
                 action_tx: action_tx.clone(),
+                mouse_tx: mouse_tx.clone(),
             }));
 
             if matches!(&driver_status, state::DriverStatus::Ready) {
@@ -467,6 +473,17 @@ pub fn run() {
                     log::error!("[setup] keyboard worker failed: {}", e);
                 } else {
                     log::info!("[setup] keyboard worker started");
+                }
+
+                // 启动鼠标模拟 worker 线程 — DESIGN 10.2 / 阶段 15
+                if let Err(e) = mouse_worker::start_mouse_worker(
+                    mouse_rx,
+                    shared_state.clone(),
+                    worker_ctx.clone(),
+                ) {
+                    log::error!("[setup] mouse worker failed: {}", e);
+                } else {
+                    log::info!("[setup] mouse worker started");
                 }
             } else {
                 log::warn!("[setup] Interception not ready, hotkeys and simulation disabled");

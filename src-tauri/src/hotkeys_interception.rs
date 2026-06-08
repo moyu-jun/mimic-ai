@@ -187,38 +187,30 @@ pub fn start_hotkey_listener(
     Ok(())
 }
 
-/// 启动热键回调 — 状态机门控 + 页面过滤 — DESIGN 8.3
+/// 启动热键回调 — 状态机门控 + 页面过滤 — DESIGN 8.3 / 阶段 15
 fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str) {
-    let new_status = if current_page == "keyboard" {
-        RuntimeStatus::RunningKeyboard
+    if current_page == "keyboard" {
+        handle_start_keyboard(app, state);
     } else {
-        RuntimeStatus::RunningMouse
-    };
+        handle_start_mouse(app, state);
+    }
+}
 
-    info!(
-        "[hotkeys_interception] start triggered: Idle -> {:?} (page={})",
-        new_status, current_page
-    );
+/// 按键模拟启动分支
+fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
+    let new_status = RuntimeStatus::RunningKeyboard;
+    info!("[hotkeys_interception] start triggered: Idle -> RunningKeyboard");
 
-    // 克隆需要的数据，避免在 spawn 线程中长期持有 state 锁
     let (selected_actions, action_tx, stop_flag) = {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
-                error!("[hotkeys_interception] start: failed to lock state: {}", e);
+                error!("[hotkeys_interception] start_keyboard: failed to lock state: {}", e);
                 return;
             }
         };
-
-        // 更新状态
         app_state.runtime_status = new_status.clone();
-
-        // 重置停止标记
-        app_state
-            .stop_flag
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-
-        // 克隆选中的 actions
+        app_state.stop_flag.store(false, std::sync::atomic::Ordering::Relaxed);
         let selected = app_state
             .config
             .keyboard_actions
@@ -226,77 +218,120 @@ fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str)
             .filter(|a| a.selected)
             .cloned()
             .collect::<Vec<_>>();
-
-        (
-            selected,
-            app_state.action_tx.clone(),
-            app_state.stop_flag.clone(),
-        )
+        (selected, app_state.action_tx.clone(), app_state.stop_flag.clone())
     };
 
-    // 发送 runtime_status_changed 事件
-    if let Err(e) = app.emit(
-        "runtime_status_changed",
-        serde_json::json!({ "status": new_status }),
-    ) {
-        error!(
-            "[hotkeys_interception] failed to emit runtime_status_changed: {}",
-            e
-        );
+    if let Err(e) = app.emit("runtime_status_changed", serde_json::json!({ "status": new_status })) {
+        error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
     }
 
-    // 启动模拟循环线程
     let app_clone = app.clone();
     let state_clone = state.clone();
     std::thread::spawn(move || {
         info!(
-            "[hotkeys_interception] simulation loop started, {} actions selected",
+            "[hotkeys_interception] keyboard simulation loop started, {} actions",
             selected_actions.len()
         );
 
         if selected_actions.is_empty() {
-            info!("[hotkeys_interception] no selected actions, stopping immediately");
-            // 立即切回 Idle
-            if let Ok(mut app_state) = state_clone.lock() {
-                app_state.runtime_status = RuntimeStatus::Idle;
-            }
-            let _ = app_clone.emit(
-                "runtime_status_changed",
-                serde_json::json!({ "status": RuntimeStatus::Idle }),
-            );
+            info!("[hotkeys_interception] no selected keyboard actions, stopping immediately");
+            if let Ok(mut s) = state_clone.lock() { s.runtime_status = RuntimeStatus::Idle; }
+            let _ = app_clone.emit("runtime_status_changed", serde_json::json!({ "status": RuntimeStatus::Idle }));
             return;
         }
 
-        // 循环模拟
         loop {
             for action in &selected_actions {
-                // 宏：在每个事件前检查停止标记
                 macro_rules! check_stop {
                     () => {
                         if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                            info!("[hotkeys_interception] stop_flag detected, exiting immediately");
+                            info!("[hotkeys_interception] stop_flag detected, exiting keyboard loop");
                             return;
                         }
                     };
                 }
-
                 check_stop!();
-                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyPress {
-                    scan_code: action.scan_code,
-                }) {
+                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyPress { scan_code: action.scan_code }) {
                     error!("[hotkeys_interception] failed to send KeyPress: {}", e);
                     return;
                 }
-
                 check_stop!();
-                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyRelease {
-                    scan_code: action.scan_code,
-                }) {
+                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyRelease { scan_code: action.scan_code }) {
                     error!("[hotkeys_interception] failed to send KeyRelease: {}", e);
                     return;
                 }
+                check_stop!();
+                std::thread::sleep(std::time::Duration::from_millis(action.interval_ms));
+            }
+        }
+    });
+}
 
-                // Delay 由生产者线程自己处理，不占用通道容量
+/// 鼠标模拟启动分支 — DESIGN 10.2 / 阶段 15
+fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
+    let new_status = RuntimeStatus::RunningMouse;
+    info!("[hotkeys_interception] start triggered: Idle -> RunningMouse");
+
+    let (valid_actions, mouse_tx, stop_flag) = {
+        let mut app_state = match state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("[hotkeys_interception] start_mouse: failed to lock state: {}", e);
+                return;
+            }
+        };
+        app_state.runtime_status = new_status.clone();
+        app_state.stop_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        // 跳过坐标为 null 的行（DESIGN 10.2 / REQUIREMENTS 3.9）
+        let valid = app_state
+            .config
+            .mouse_actions
+            .iter()
+            .filter(|a| a.x.is_some() && a.y.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        (valid, app_state.mouse_tx.clone(), app_state.stop_flag.clone())
+    };
+
+    if let Err(e) = app.emit("runtime_status_changed", serde_json::json!({ "status": new_status })) {
+        error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
+    }
+
+    let app_clone = app.clone();
+    let state_clone = state.clone();
+    std::thread::spawn(move || {
+        info!(
+            "[hotkeys_interception] mouse simulation loop started, {} valid actions",
+            valid_actions.len()
+        );
+
+        if valid_actions.is_empty() {
+            // 全部坐标无效：日志明确，保持 ReadyMouse（不报错）— TASKS 阶段 15 验收
+            info!("[hotkeys_interception] all mouse actions have null coords, keeping ReadyMouse");
+            if let Ok(mut s) = state_clone.lock() { s.runtime_status = crate::state::RuntimeStatus::ReadyMouse; }
+            let _ = app_clone.emit(
+                "runtime_status_changed",
+                serde_json::json!({ "status": crate::state::RuntimeStatus::ReadyMouse }),
+            );
+            return;
+        }
+
+        loop {
+            for action in &valid_actions {
+                macro_rules! check_stop {
+                    () => {
+                        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            info!("[hotkeys_interception] stop_flag detected, exiting mouse loop");
+                            return;
+                        }
+                    };
+                }
+                let (x, y) = (action.x.unwrap(), action.y.unwrap());
+                check_stop!();
+                if let Err(e) = mouse_tx.send(crate::mouse_worker::MouseEvent::Click { x, y }) {
+                    error!("[hotkeys_interception] failed to send MouseClick: {}", e);
+                    return;
+                }
                 check_stop!();
                 std::thread::sleep(std::time::Duration::from_millis(action.interval_ms));
             }
