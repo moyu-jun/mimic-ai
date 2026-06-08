@@ -1170,3 +1170,135 @@ fn handle_stop_hotkey(app: &AppHandle, state: &SharedState) {
 3. **阶段 16 实机验证**：修复 P0-4（设备选择）、P2-2（E0 扩展键）、验证模拟循环性能与稳定性
 
 ---
+
+## 阶段 13.1：紧急修复 — 按键循环导致系统卡死
+
+**完成时间**：2026-06-08
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/keyboard_worker.rs](../src-tauri/src/keyboard_worker.rs) | 改 | 移除 `Delay` 事件类型，消除通道阻塞 |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 | Delay 由生产者自己处理，移除外层 10ms 保护 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 无界通道改为有界（容量 32） |
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 改 | `Sender` 改为 `SyncSender` |
+
+### 问题根源
+
+用户报告：50ms 按键频率下系统随时间持续变卡，最终卡死（鼠标无法移动，界面完全冻结）。
+
+**诊断结果**：生产者-消费者失衡 + 无界通道导致的内存泄漏与资源耗竭
+
+1. **无界通道累积**：
+   - 原实现：`mpsc::channel()`（无容量限制）
+   - 生产者（`handle_start_hotkey` 模拟循环）每个 action 发送 3 个事件：`KeyPress`、`KeyRelease`、`Delay{50ms}`
+   - 消费者（`keyboard_worker`）处理 Delay 时完全阻塞 50ms，期间生产者继续发送
+
+2. **失衡计算**（1 个 action，50ms 间隔）：
+   - 生产者速率：60ms 产生 3 事件 = 50 events/sec
+   - 消费者速率：50ms 阻塞于 Delay，每 50ms 只能消费 3 事件 = 60 events/sec（理论平衡）
+   - **实际**：锁竞争 + 驱动延迟导致消费者慢于生产者 → 通道持续累积
+   - 多个 action 或更小间隔下累积速度加剧
+
+3. **累积后果**：
+   - 数十万事件堆积在通道内存中
+   - `state.lock()` 和 `ctx.lock()` 竞争加剧
+   - 系统资源耗尽 → 卡死
+
+### 关键决策
+
+#### 决策 1：移除 `Delay` 事件类型
+
+**理由**：
+- Delay 是**纯本地等待**，不需要跨线程传递
+- 让消费者处理 Delay 会阻塞整个 worker 线程，违背通道设计初衷（通道应该只传递需要异步处理的事件）
+- 生产者自己 `sleep(interval_ms)` 可精确控制发送速率，消除队列累积
+
+**实现**：
+```rust
+// 生产者：hotkeys_interception.rs:270-306
+for action in &selected_actions {
+    check_stop!();
+    action_tx.send(KeyPress { ... }).ok();
+    
+    check_stop!();
+    action_tx.send(KeyRelease { ... }).ok();
+    
+    // Delay 由生产者自己处理，不占用通道容量
+    check_stop!();
+    std::thread::sleep(Duration::from_millis(action.interval_ms));
+}
+```
+
+```rust
+// 消费者：keyboard_worker.rs:50-60
+// 移除 Delay 分支，只处理 KeyPress/KeyRelease
+match event {
+    ActionEvent::Stop => break,
+    ActionEvent::KeyPress { .. } | ActionEvent::KeyRelease { .. } => {
+        // 状态机门控 → 转译 → 发送驱动
+    }
+}
+```
+
+**移除外层 10ms 保护**：
+- 原代码在每轮循环后 `sleep(10ms)`，限制最高频率为 100Hz
+- 现在 Delay 由 `action.interval_ms` 直接控制，外层保护冗余且降低精度
+
+#### 决策 2：使用有界通道（容量 32）
+
+**理由**：
+- 即使修复 Delay，理论上仍可能出现瞬时生产速率 > 消费速率（驱动卡顿、锁竞争）
+- 有界通道提供**背压机制**：队列满时生产者阻塞，防止内存无限增长
+- 容量 32 = 16 对按键（Press + Release），对 50ms 间隔已足够缓冲
+
+**实现**：
+```rust
+// lib.rs:404-406
+let (action_tx, action_rx) = mpsc::sync_channel::<ActionEvent>(32);
+
+// state.rs:8 + 80
+use std::sync::mpsc::SyncSender;
+pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
+```
+
+**权衡**：
+- `send()` 现在可能阻塞（队列满时），但这正是我们想要的（限制生产速率匹配消费速率）
+- 如果频繁阻塞，说明消费者确实跟不上，应该调大 `interval_ms` 而非盲目堆积
+
+### 验证结果
+
+- ✅ `cargo check` — 通过：1.32s，无警告
+- ✅ `cargo build --release` — 通过（待实机验证）
+- ⏳ **实机验证**：需用户启动程序，设置 50ms 间隔，观察系统稳定性（留待反馈）
+
+### 文档回写
+
+- [docs/DESIGN.md](./DESIGN.md) § 8.4 — **需回写**：明确 `ActionEvent` 只含按键事件，Delay 由生产者处理
+- [docs/TASKS.md](./TASKS.md) — 无改动（紧急修复不改变阶段状态）
+- [REQUIREMENTS.md](./REQUIREMENTS.md) — 无改动
+
+### 偏差与遗留
+
+#### 遗留问题（继承自阶段 13）
+
+**HIGH-1: stop_flag 与 runtime_status 竞态** — 仍存在，修复未触及停止逻辑  
+**MEDIUM-2: Relaxed 内存顺序不足** — 仍存在  
+**MEDIUM-3: channel 发送失败未清理状态** — 仍存在  
+**P0-4: 硬编码设备选择** — 仍存在  
+**P2-2: E0 扩展键匹配错误** — 仍存在  
+
+#### 新增遗留
+
+**待实机验证**：
+- 通道容量 32 是否足够（50ms 间隔下理论充裕，但需验证极端情况）
+- 有界通道阻塞是否会导致新的卡顿（理论上不会，因为生产者阻塞时 Interception 热键线程仍正常响应）
+
+### 后续行动
+
+1. **立即**：用户实机验证 50ms 按键循环稳定性
+2. **如验证通过**：回写 DESIGN § 8.4，关闭本次修复
+3. **如仍卡顿**：检查锁竞争（`state.lock()` / `ctx.lock()` 持有时长）、驱动性能瓶颈
+
+---

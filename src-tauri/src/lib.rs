@@ -401,7 +401,8 @@ pub fn run() {
             };
 
             // 创建按键模拟 channel — DESIGN 8.4 / 阶段 13
-            let (action_tx, action_rx) = mpsc::channel::<ActionEvent>();
+            // 使用有界通道（容量 32）防止生产者-消费者失衡时内存泄漏
+            let (action_tx, action_rx) = mpsc::sync_channel::<ActionEvent>(32);
 
             // 启动 Interception 热键监听线程 — DESIGN 8.3 / 阶段 13
             let shared_state: SharedState = Arc::new(Mutex::new(AppState {

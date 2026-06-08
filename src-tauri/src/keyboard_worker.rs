@@ -18,8 +18,6 @@ pub enum ActionEvent {
     KeyPress { scan_code: u16 },
     /// 按键释放
     KeyRelease { scan_code: u16 },
-    /// 延迟（毫秒）
-    Delay { duration_ms: u64 },
     /// 停止信号（保留，当前通过 stop_flag 实现停止）
     #[allow(dead_code)]
     Stop,
@@ -51,12 +49,6 @@ pub fn start_keyboard_worker(
             if matches!(event, ActionEvent::Stop) {
                 info!("[keyboard_worker] received stop signal");
                 break;
-            }
-
-            // 处理延迟事件
-            if let ActionEvent::Delay { duration_ms } = event {
-                std::thread::sleep(std::time::Duration::from_millis(duration_ms));
-                continue;
             }
 
             // 状态机门控：仅在 RunningKeyboard 状态下执行模拟

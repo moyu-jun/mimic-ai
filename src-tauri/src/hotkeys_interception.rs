@@ -296,13 +296,9 @@ fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str)
                     return;
                 }
 
+                // Delay 由生产者线程自己处理，不占用通道容量
                 check_stop!();
-                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::Delay {
-                    duration_ms: action.interval_ms,
-                }) {
-                    error!("[hotkeys_interception] failed to send Delay: {}", e);
-                    return;
-                }
+                std::thread::sleep(std::time::Duration::from_millis(action.interval_ms));
             }
         }
     });
