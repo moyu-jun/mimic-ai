@@ -1,0 +1,31 @@
+fix(stage-12-13): 修复核心模拟循环缺失 + 清理 global-shortcut 残留
+
+P0 修复:
+- 实现 handle_start_hotkey 模拟循环（spawn 线程发送 ActionEvent）
+- 实现 handle_stop_hotkey 停止机制（设置 stop_flag + 50ms 等待）
+- action_tx 现在正确发送 KeyPress/KeyRelease/Delay 事件
+
+P1 清理:
+- 移除 tauri-plugin-global-shortcut 依赖（Cargo.toml）
+- 移除插件初始化代码（lib.rs）
+- 移除权限声明（capabilities/default.json）
+
+P2 修复:
+- 统一所有 state.lock() 为 state.inner().lock()（5 处）
+- 清理 ActionEvent::Stop dead_code 警告
+
+验证:
+- cargo check 通过（无警告）
+- cargo clippy 通过（无警告）
+- ecc:rust-reviewer 深度审查完成
+
+遗留问题（已记录至 REVIEW-12-13-FIX-PLAN.md）:
+- HIGH: 竞态条件（stop_flag 与 runtime_status 不一致）
+- MEDIUM: Ordering::Relaxed 内存顺序、channel 错误清理
+- P0-4: 硬编码 device=1（待阶段 16 实机验证）
+- P2-2: E0 扩展键匹配错误（待阶段 16 实机验证）
+- P2-3: set_current_page 不切换 Ready 状态（待后续阶段）
+
+详见: docs/REVIEW-12-13-FIX-PLAN.md + docs/CHANGELOG.md
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
