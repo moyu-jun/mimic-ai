@@ -72,8 +72,10 @@ pub struct AppState {
     pub driver_status: DriverStatus,
     /// 停止标记，供 worker 线程检查
     pub stop_flag: Arc<AtomicBool>,
-    /// Interception 上下文（阶段 13 Interception 热键）— DESIGN 8.3
-    pub interception_context: Arc<Mutex<Option<SendInterception>>>,
+    /// 监听专用 context（设置 filter + 阻塞 wait）
+    pub interception_listener: Arc<Mutex<Option<SendInterception>>>,
+    /// 模拟专用 context（仅 send，非阻塞）
+    pub interception_worker: Arc<Mutex<Option<SendInterception>>>,
     /// 按键模拟事件发送器（阶段 13）— DESIGN 8.4
     pub action_tx: Sender<crate::keyboard_worker::ActionEvent>,
 }

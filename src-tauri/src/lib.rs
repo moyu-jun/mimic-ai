@@ -366,8 +366,8 @@ pub fn run() {
             log::info!("[setup] driver status: {:?}", driver_status);
 
             // 初始化 Interception 上下文 — DESIGN 8.3 / 阶段 13
-            // 监听线程 context（设置 filter + wait）
-            let interception_ctx = if matches!(&driver_status, state::DriverStatus::Ready) {
+            // 创建监听专用 context（设置 filter + wait）
+            let listener_ctx = if matches!(&driver_status, state::DriverStatus::Ready) {
                 match interception::Interception::new() {
                     Some(ctx) => {
                         log::info!("[setup] Interception listener context created");
@@ -383,7 +383,7 @@ pub fn run() {
                 Arc::new(Mutex::new(None))
             };
 
-            // worker 独立注入 context（仅用于 send，避免死锁）— 修复根因 #4
+            // 创建 worker 专用 context（仅 send，非阻塞）
             let worker_ctx = if matches!(&driver_status, state::DriverStatus::Ready) {
                 match interception::Interception::new() {
                     Some(ctx) => {
@@ -411,7 +411,8 @@ pub fn run() {
                 runtime_status: RuntimeStatus::Idle,
                 driver_status: driver_status.clone(),
                 stop_flag: Arc::new(AtomicBool::new(false)),
-                interception_context: interception_ctx.clone(),
+                interception_listener: listener_ctx.clone(),
+                interception_worker: worker_ctx.clone(),
                 action_tx: action_tx.clone(),
             }));
 
@@ -419,7 +420,7 @@ pub fn run() {
                 if let Err(e) = hotkeys_interception::start_hotkey_listener(
                     app.handle().clone(),
                     shared_state.clone(),
-                    interception_ctx.clone(),
+                    listener_ctx.clone(),
                 ) {
                     log::error!("[setup] Interception hotkey listener failed: {}", e);
                 } else {

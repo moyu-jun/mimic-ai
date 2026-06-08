@@ -159,8 +159,13 @@ pub fn start_hotkey_listener(
                                     // 阻断热键事件
                                     continue;
                                 }
+                                RuntimeStatus::Idle if is_stop_key => {
+                                    // Idle 状态下按停止键 → 阻断（不透传）
+                                    info!("[hotkeys_interception] stop key pressed in Idle state, ignoring");
+                                    continue;
+                                }
                                 _ => {
-                                    // 状态不匹配（如 Running 时按启动键，或 Idle 时按停止键），透传
+                                    // 状态不匹配（如 Running 时按启动键），透传
                                     interception.send(device, &[*stroke]);
                                     continue;
                                 }
@@ -265,13 +270,17 @@ fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str)
         // 循环模拟
         loop {
             for action in &selected_actions {
-                // 检查停止标记
-                if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    info!("[hotkeys_interception] stop_flag detected, exiting loop");
-                    return;
+                // 宏：在每个事件前检查停止标记
+                macro_rules! check_stop {
+                    () => {
+                        if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            info!("[hotkeys_interception] stop_flag detected, exiting immediately");
+                            return;
+                        }
+                    };
                 }
 
-                // 发送按键按下
+                check_stop!();
                 if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyPress {
                     scan_code: action.scan_code,
                 }) {
@@ -279,7 +288,7 @@ fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str)
                     return;
                 }
 
-                // 发送按键释放
+                check_stop!();
                 if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyRelease {
                     scan_code: action.scan_code,
                 }) {
@@ -287,7 +296,7 @@ fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str)
                     return;
                 }
 
-                // 发送延迟
+                check_stop!();
                 if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::Delay {
                     duration_ms: action.interval_ms,
                 }) {
