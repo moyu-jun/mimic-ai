@@ -130,8 +130,11 @@ pub fn start_hotkey_listener(
                             )
                         };
 
-                        // 匹配启动热键
-                        if *code as u16 == start_scan_code {
+                        // 统一热键匹配逻辑 — 支持启动和停止键相同的 toggle 场景
+                        let is_start_key = *code as u16 == start_scan_code;
+                        let is_stop_key = *code as u16 == stop_scan_code;
+
+                        if is_start_key || is_stop_key {
                             // 页面过滤 — REQUIREMENTS 3.6
                             if current_page.as_str() != "keyboard"
                                 && current_page.as_str() != "mouse"
@@ -140,31 +143,27 @@ pub fn start_hotkey_listener(
                                 continue;
                             }
 
-                            // 状态机门控 — DESIGN 9.2：仅 Idle 时启动键生效
-                            if runtime_status == RuntimeStatus::Idle {
-                                handle_start_hotkey(&app, &state, current_page.as_str());
-                                // 阻断热键事件，不透传到系统
-                                continue;
-                            } else {
-                                // 状态不匹配，透传
-                                interception.send(device, &[*stroke]);
-                                continue;
-                            }
-                        }
-
-                        // 匹配停止热键
-                        if *code as u16 == stop_scan_code {
-                            // 状态机门控 — DESIGN 9.2：仅 Running* 时停止键生效
-                            if runtime_status == RuntimeStatus::RunningKeyboard
-                                || runtime_status == RuntimeStatus::RunningMouse
-                            {
-                                handle_stop_hotkey(&app, &state);
-                                // 阻断热键事件
-                                continue;
-                            } else {
-                                // 状态不匹配，透传
-                                interception.send(device, &[*stroke]);
-                                continue;
+                            // 状态机门控：根据当前状态决定行为（支持 toggle）
+                            match runtime_status {
+                                RuntimeStatus::Idle if is_start_key => {
+                                    // Idle 状态下按启动键 → 启动模拟
+                                    handle_start_hotkey(&app, &state, current_page.as_str());
+                                    // 阻断热键事件，不透传到系统
+                                    continue;
+                                }
+                                RuntimeStatus::RunningKeyboard | RuntimeStatus::RunningMouse
+                                    if is_stop_key =>
+                                {
+                                    // Running 状态下按停止键 → 停止模拟
+                                    handle_stop_hotkey(&app, &state);
+                                    // 阻断热键事件
+                                    continue;
+                                }
+                                _ => {
+                                    // 状态不匹配（如 Running 时按启动键，或 Idle 时按停止键），透传
+                                    interception.send(device, &[*stroke]);
+                                    continue;
+                                }
                             }
                         }
 
