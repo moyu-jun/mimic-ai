@@ -29,10 +29,12 @@ interception = "0.1"
 
 # 阶段 10：管理员权限检测 + 提权重启
 # 阶段 11：注册表驱动检测（Win32_System_Registry）
+# 阶段 14：鼠标坐标拾取（Win32_System_LibraryLoader 提供 GetModuleHandleW）
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Shell",

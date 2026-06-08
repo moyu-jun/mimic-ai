@@ -12,6 +12,7 @@ mod driver;
 mod hotkeys;
 mod hotkeys_interception;
 mod keyboard_worker;
+mod mouse_picker;
 mod state;
 
 use config::AppConfig;
@@ -253,6 +254,35 @@ fn get_runtime_status(state: tauri::State<SharedState>) -> Result<RuntimeStatus,
     Ok(app_state.runtime_status.clone())
 }
 
+/// 鼠标坐标拾取 — DESIGN 11.2 / 阶段 14
+///
+/// 仅可从 ReadyMouse 状态进入；运行 / 拾取中直接拒绝（运行态守卫，DESIGN 6.1）。
+/// 进入后切到 PickingMouse、隐藏窗口、注册 low-level mouse hook 等待一次左键点击。
+#[tauri::command]
+fn start_pick_mouse_position(
+    row_id: String,
+    state: tauri::State<SharedState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    // 运行态守卫 — DESIGN 6.1：Running* / PickingMouse 时拒绝
+    {
+        let app_state = state
+            .inner()
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard
+            | RuntimeStatus::RunningMouse
+            | RuntimeStatus::PickingMouse => {
+                return Err("busy: simulation running".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    mouse_picker::start_pick_mouse_position(app, state.inner().clone(), row_id)
+}
+
 /// 以管理员身份重启自身 — DESIGN 14.1 / 阶段 10
 ///
 /// 触发 UAC 提示；用户取消或 ShellExecuteW 失败时返回 Err 字符串。
@@ -460,6 +490,7 @@ pub fn run() {
             update_hotkeys,
             stop_simulation,
             get_runtime_status,
+            start_pick_mouse_position,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

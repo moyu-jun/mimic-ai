@@ -2,14 +2,41 @@
 /**
  * 鼠标模拟页 — 需求 3.3.3 / DESIGN 15.6
  * 表格四列：X坐标 / Y坐标 / 时间间隔 / 操作（坐标拾取 + 删除）。
- * 表头固定（sticky），数据行滚动；阶段 5 数据全部 mock 前端，坐标拾取按钮仅 console.log 占位。
+ * 表头固定（sticky），数据行滚动。
  * 阶段 12：移除 onMounted/onBeforeUnmount 中的状态切换，由 set_current_page 统一管理。
+ * 阶段 14：坐标拾取接真实命令 start_pick_mouse_position，监听 mouse_position_picked 回填并持久化。
  */
+import { onMounted, onBeforeUnmount } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { appStore } from '../stores/appStore'
 import type { MouseAction } from '../types/config'
 import { persistConfig } from '../lib/configUtil'
 
 const DEFAULT_INTERVAL_MS = 20
+
+let unlistenPicked: UnlistenFn | null = null
+
+// 阶段 14：监听坐标拾取完成事件，回填对应行 X/Y 并持久化
+onMounted(async () => {
+  unlistenPicked = await listen<{ rowId: string; x: number; y: number }>(
+    'mouse_position_picked',
+    (event) => {
+      const { rowId, x, y } = event.payload
+      const action = appStore.mouseActions.find(a => a.id === rowId)
+      if (!action) return
+      action.x = x
+      action.y = y
+      persistConfig().catch(() => {
+        // 错误已在 configUtil 中记录，不阻塞用户操作
+      })
+    },
+  )
+})
+
+onBeforeUnmount(() => {
+  if (unlistenPicked) unlistenPicked()
+})
 
 function addAction(): void {
   const newAction: MouseAction = {
@@ -65,8 +92,10 @@ function onIntervalCommit(action: MouseAction, e: Event): void {
 }
 
 function startPickPosition(id: string): void {
-  // 阶段 5 占位：仅 console.log，阶段 14 接真实命令
-  console.log('[MousePage] 坐标拾取占位 —', id)
+  // 阶段 14：进入拾取 — 后端隐藏窗口并监听一次全局左键点击
+  invoke('start_pick_mouse_position', { rowId: id }).catch((err) => {
+    console.error('[MousePage] 坐标拾取启动失败:', err)
+  })
 }
 </script>
 

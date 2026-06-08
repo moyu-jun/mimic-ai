@@ -1302,3 +1302,39 @@ pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
 3. **如仍卡顿**：检查锁竞争（`state.lock()` / `ctx.lock()` 持有时长）、驱动性能瓶颈
 
 ---
+
+## 阶段 14：鼠标坐标拾取
+
+**完成时间**：2026-06-08
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/mouse_picker.rs](../src-tauri/src/mouse_picker.rs) | 新建 | `WH_MOUSE_LL` low-level mouse hook；独立消息循环线程；命中左键 → 取消 hook → 恢复窗口 → 发 `mouse_position_picked`；异常路径发 `simulation_error` |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 引入 `mouse_picker` 模块；新增 `start_pick_mouse_position` 命令（含运行态守卫）；注册到 `invoke_handler` |
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | 新增 `Win32_System_LibraryLoader` feature（`GetModuleHandleW` 所需） |
+| [src/pages/MousePage.vue](../src/pages/MousePage.vue) | 改 | `startPickPosition` 接 `invoke('start_pick_mouse_position')`；`onMounted` 注册 `mouse_position_picked` 监听器，回填 X/Y 并 `persistConfig`；`onBeforeUnmount` 取消监听 |
+
+### 关键决策
+
+- **hook 在独立线程运行消息循环** — `WH_MOUSE_LL` 回调必须在安装它的线程上触发，且该线程需有消息循环（`GetMessageW`）；主线程（Tauri 事件循环）不适合阻塞，因此 picker 在 `std::thread::spawn` 线程内完成完整生命周期。
+- **静态原子量传坐标** — hook 回调是 C ABI 函数，无法捕获 Rust 闭包变量；用 `AtomicI32 × 2 + AtomicBool` 传递坐标，运行态守卫保证同一时刻只有一次拾取，无竞态风险。
+- **不消费点击事件** — `CallNextHookEx` 透传点击，目标窗口仍能正常响应；DESIGN 11.2 未要求消费，透传更简单且副作用少。
+- **隐藏窗口用 `get_webview_window("main")`** — 无显式 label 的 Tauri 2 窗口默认 label 为 `"main"`，`hide()` 为 tauri 提供的线程安全 API，直接在命令线程调用。
+
+### 验证结果
+
+- `cargo check` — 1.66s，无 warning ✅
+- `cargo clippy` — 8.72s，无 warning ✅
+- `npm run build` (vue-tsc + vite) — 52 模块，无类型错误 ✅
+- 实机验证（点击拾取 → 窗口隐藏 → 左键 → 窗口恢复 → X/Y 回填写盘）— ⏳ 待阶段 16 复核
+
+### 文档回写
+
+- [TASKS.md](./TASKS.md) 阶段 14 验收项目：`cargo check/clippy/build` 静态验收已通过；实机交互项留待阶段 16
+
+### 偏差与遗留
+
+- 实机三项验收（窗口隐/显、坐标回填、状态栏"正在拾取"）依赖驱动已安装 + 实机环境，与阶段 16 一并复核
+- 拾取期间无取消机制（符合 DESIGN 11.2 设计约束，用户只能通过左键点击完成）
