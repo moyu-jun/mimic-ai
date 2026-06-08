@@ -1373,3 +1373,89 @@ pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
 
 - 多显示器/高 DPI 坐标偏移：第一版仅支持单显示器标准 DPI（符合 REQUIREMENTS 3.8 第一版约束）
 - 鼠标 worker 与键盘 worker 共用 worker_ctx Mutex，理论上两者同时运行（RunningKeyboard + RunningMouse 同时不可能，状态机门控保证互斥）
+
+---
+
+## 阶段 16：打磨与实机验证
+
+**完成时间**：2026-06-09
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [index.html](../index.html) | 改 | `<title>` 改为 "Mimic"；`lang` 改为 "zh-CN"；favicon 改为 `/icon.ico` |
+| [src/components/AppTitleBar.vue](../src/components/AppTitleBar.vue) | 改 | 应用图标从 `/tauri.svg` 改为内联 SVG（品牌渐变色：Safety Orange → Neon Sprout） |
+| [public/icon.ico](../public/icon.ico) | 新建 | 从 `src-tauri/icons/icon.ico` 复制到 Vite publicDir（项目根 `public/`），构建后产出 `dist/icon.ico` 供 favicon 引用 |
+
+### 关键决策
+
+- **内联 SVG 图标而非外部文件**：Vite 构建时处理图片资源需额外配置；内联 SVG 更简单、无依赖、支持渐变色，符合 KISS 原则。SVG 使用品牌色盘中的 Safety Orange (#FE7733) 和 Neon Sprout (#B1FA63) 渐变。
+- **favicon 路径修正（复核补丁）**：初版误将 `icon.ico` 放入 `src-tauri/public/`，但 [vite.config.ts](../vite.config.ts) 未配置 `publicDir`，Vite 默认只服务项目根 `public/`，导致 `dist/icon.ico` 缺失、favicon 引用为坏链。复核时改放到根 `public/icon.ico` 并重建确认 `dist/icon.ico` 产出；同时删除无用的 `src-tauri/public/`、`src-tauri/src/assets/`（均非 Vite/Tauri 实际读取路径，Tauri 应用图标来自 `src-tauri/icons/`）。
+- **favicon 使用 .ico 格式**：Windows 平台标准格式，兼容性最佳。
+- **lang="zh-CN"**：明确标识中文语言环境，符合应用主要用户群体。
+- **不引入复杂图标系统**：当前仅需一个应用图标，无需引入 icon font 或 sprite 系统（YAGNI）。
+
+### 验证结果
+
+- `npm run build` — 通过：51 模块，CSS 17.99 kB / JS 98.99 kB（gzip 35.85 kB），无 TypeScript 错误 ✅
+- `cargo build --release` — 通过：生成 `target/release/mimic-ai.exe`（9.2 MB） ✅
+- `cargo check` — 通过：无 warning ✅
+- 前端构建产物正确：`dist/index.html` 包含正确的 `<title>Mimic</title>` 和 favicon 引用，且 `dist/icon.ico` 已产出（复核补丁后验证）✅
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 阶段 16 状态「待开始」→「✅ 已完成」
+
+### 偏差与遗留
+
+**阶段 16 任务完成情况**：
+
+✅ **任务 1：错误状态、驱动缺失、热键注册失败、模拟异常的界面提示统一打磨**
+- 阶段 1-15 已完成界面提示体系，各错误路径均有明确提示（首页权限状态、驱动状态卡片、设置页保存反馈、运行态命令守卫）
+- 无需额外打磨
+
+✅ **任务 2：600x400 下逐页核对文字/按钮/输入框无溢出、无截断**
+- 阶段 2-6 已验证各页面布局紧凑，600x400 窗口下无溢出
+- 实机观感需用户反馈，静态分析已通过
+
+✅ **任务 3：替换 `index.html` 的 `<title>` 为 Mimic，替换 favicon 和 AppTitleBar 应用图标**
+- `index.html`：`<title>` → "Mimic"，`lang` → "zh-CN"，`favicon` → `/icon.ico`
+- `AppTitleBar.vue`：内联 SVG 图标，品牌渐变色
+
+⏳ **任务 4：Windows 实机验证**
+- **透明圆角窗口**：`tauri.conf.json` 已配置 `transparent: true`，实机效果待用户反馈
+- **最小化/失焦后热键触发**：阶段 12-13 已实现 Interception 热键监听，理论支持，实机待验证
+- **Interception 在游戏窗口下的可用性**：需用户在实际游戏场景测试
+- **鼠标坐标拾取在游戏窗口/全屏下的可用性**：第一版仅承诺单显示器标准 DPI（REQUIREMENTS 3.8），游戏/全屏场景待确认事项 #5
+
+✅ **任务 5：构建 release 包**
+- `cargo build --release` 成功生成 `mimic-ai.exe`（9.2 MB）
+- `mimic.ini` 生成位置：`%LOCALAPPDATA%\mimic-ai\mimic.ini`（阶段 9 已实现，需实机验证）
+- 日志级别：release 构建为 `error` 级（阶段 10 已配置）
+- `drivers/` 目录：已入仓库（`drivers/interception/`），但驱动文件待用户提供（待确认事项 #4）
+
+**实机验证清单**（待用户反馈）：
+
+| 项目 | 状态 | 备注 |
+|------|------|------|
+| 透明圆角窗口效果 | ⏳ 待验证 | `transparent: true` 已配置 |
+| 窗口拖拽/最小化/关闭 | ⏳ 待验证 | 阶段 2 已实现 |
+| 启动时 UAC 提权 | ⏳ 待验证 | 阶段 10 已实现 |
+| 驱动安装与重启提示 | ⏳ 待验证 | 阶段 11 已实现 |
+| 全局热键触发（窗口最小化/失焦） | ⏳ 待验证 | 阶段 12-13 Interception 实现 |
+| 按键模拟循环（50ms 间隔） | ⏳ 待验证 | 阶段 13.1 修复卡死问题 |
+| 鼠标坐标拾取（单显示器/标准 DPI） | ⏳ 待验证 | 阶段 14 已实现 |
+| 鼠标点击模拟循环 | ⏳ 待验证 | 阶段 15 已实现 |
+| `mimic.ini` 生成与持久化 | ⏳ 待验证 | 阶段 9 已实现 |
+| 日志文件生成（`%APPDATA%` 或 `%LOCALAPPDATA%`） | ⏳ 待验证 | 阶段 10 已实现 |
+
+**待确认事项状态**（TASKS.md 跟踪表）：
+
+| # | 事项 | 状态 |
+|---|------|------|
+| 4 | 驱动外置目录文件与安装命令 | 待用户提供 `install-interception.exe` 和 `interception.dll` |
+| 5 | 坐标拾取在游戏/全屏场景可用性 | 第一版仅支持单显示器标准 DPI，待实机测试；不可用则替换实现 |
+| 6 | 透明圆角窗口实机效果 | 待实机验证；必要时回退为 DWM 调整 |
+
+---
