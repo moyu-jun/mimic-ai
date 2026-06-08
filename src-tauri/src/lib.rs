@@ -158,6 +158,7 @@ fn set_current_page(page: String, state: tauri::State<SharedState>) -> Result<()
     // 运行态守卫 — DESIGN 6.1
     {
         let app_state = state
+            .inner()
             .lock()
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         match app_state.runtime_status {
@@ -171,6 +172,7 @@ fn set_current_page(page: String, state: tauri::State<SharedState>) -> Result<()
     }
 
     let mut app_state = state
+        .inner()
         .lock()
         .map_err(|e| format!("Failed to lock state: {}", e))?;
     app_state.current_page = page.clone();
@@ -191,6 +193,7 @@ fn update_hotkeys(
     // 运行态守卫 — DESIGN 6.1
     {
         let app_state = state
+            .inner()
             .lock()
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         match app_state.runtime_status {
@@ -213,6 +216,7 @@ fn update_hotkeys(
 fn stop_simulation(state: tauri::State<SharedState>, app: tauri::AppHandle) -> Result<(), String> {
     let new_status = {
         let mut app_state = state
+            .inner()
             .lock()
             .map_err(|e| format!("Failed to lock state: {}", e))?;
 
@@ -243,6 +247,7 @@ fn stop_simulation(state: tauri::State<SharedState>, app: tauri::AppHandle) -> R
 #[tauri::command]
 fn get_runtime_status(state: tauri::State<SharedState>) -> Result<RuntimeStatus, String> {
     let app_state = state
+        .inner()
         .lock()
         .map_err(|e| format!("Failed to lock state: {}", e))?;
     Ok(app_state.runtime_status.clone())
@@ -320,7 +325,6 @@ pub fn run() {
                 ])
                 .build(),
         )
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             log::info!(

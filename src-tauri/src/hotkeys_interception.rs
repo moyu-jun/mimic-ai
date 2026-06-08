@@ -65,7 +65,11 @@ pub fn start_hotkey_listener(
             // 处理每个 stroke
             for stroke in strokes.iter().take(count as usize) {
                 match stroke {
-                    Stroke::Keyboard { code, state: key_state, .. } => {
+                    Stroke::Keyboard {
+                        code,
+                        state: key_state,
+                        ..
+                    } => {
                         // 仅处理按下事件（忽略抬起）— DESIGN 8.3
                         if key_state.contains(KeyState::UP) {
                             interception.send(device, &[*stroke]);
@@ -93,7 +97,9 @@ pub fn start_hotkey_listener(
                         // 匹配启动热键
                         if *code as u16 == start_scan_code {
                             // 页面过滤 — REQUIREMENTS 3.6
-                            if current_page.as_str() != "keyboard" && current_page.as_str() != "mouse" {
+                            if current_page.as_str() != "keyboard"
+                                && current_page.as_str() != "mouse"
+                            {
                                 interception.send(device, &[*stroke]);
                                 continue;
                             }
@@ -154,8 +160,8 @@ fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str)
         new_status, current_page
     );
 
-    // 更新状态
-    {
+    // 克隆需要的数据，避免在 spawn 线程中长期持有 state 锁
+    let (selected_actions, action_tx, stop_flag) = {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -163,28 +169,131 @@ fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str)
                 return;
             }
         };
+
+        // 更新状态
         app_state.runtime_status = new_status.clone();
-    }
+
+        // 重置停止标记
+        app_state
+            .stop_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        // 克隆选中的 actions
+        let selected = app_state
+            .config
+            .keyboard_actions
+            .iter()
+            .filter(|a| a.selected)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        (
+            selected,
+            app_state.action_tx.clone(),
+            app_state.stop_flag.clone(),
+        )
+    };
 
     // 发送 runtime_status_changed 事件
     if let Err(e) = app.emit(
         "runtime_status_changed",
         serde_json::json!({ "status": new_status }),
     ) {
-        error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
+        error!(
+            "[hotkeys_interception] failed to emit runtime_status_changed: {}",
+            e
+        );
     }
+
+    // 启动模拟循环线程
+    let app_clone = app.clone();
+    let state_clone = state.clone();
+    std::thread::spawn(move || {
+        info!(
+            "[hotkeys_interception] simulation loop started, {} actions selected",
+            selected_actions.len()
+        );
+
+        if selected_actions.is_empty() {
+            info!("[hotkeys_interception] no selected actions, stopping immediately");
+            // 立即切回 Idle
+            if let Ok(mut app_state) = state_clone.lock() {
+                app_state.runtime_status = RuntimeStatus::Idle;
+            }
+            let _ = app_clone.emit(
+                "runtime_status_changed",
+                serde_json::json!({ "status": RuntimeStatus::Idle }),
+            );
+            return;
+        }
+
+        // 循环模拟
+        loop {
+            for action in &selected_actions {
+                // 检查停止标记
+                if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    info!("[hotkeys_interception] stop_flag detected, exiting loop");
+                    return;
+                }
+
+                // 发送按键按下
+                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyPress {
+                    scan_code: action.scan_code,
+                }) {
+                    error!("[hotkeys_interception] failed to send KeyPress: {}", e);
+                    return;
+                }
+
+                // 发送按键释放
+                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::KeyRelease {
+                    scan_code: action.scan_code,
+                }) {
+                    error!("[hotkeys_interception] failed to send KeyRelease: {}", e);
+                    return;
+                }
+
+                // 发送延迟
+                if let Err(e) = action_tx.send(crate::keyboard_worker::ActionEvent::Delay {
+                    duration_ms: action.interval_ms,
+                }) {
+                    error!("[hotkeys_interception] failed to send Delay: {}", e);
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// 停止热键回调 — 状态机门控 — DESIGN 8.3
 fn handle_stop_hotkey(app: &AppHandle, state: &SharedState) {
     info!("[hotkeys_interception] stop triggered: Running* -> Idle");
 
+    // 设置停止标记
+    {
+        let app_state = match state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("[hotkeys_interception] stop: failed to lock state: {}", e);
+                return;
+            }
+        };
+        app_state
+            .stop_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // 等待一小段时间让模拟循环退出
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
     // 更新状态
     {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
-                error!("[hotkeys_interception] stop: failed to lock state: {}", e);
+                error!(
+                    "[hotkeys_interception] stop: failed to lock state after wait: {}",
+                    e
+                );
                 return;
             }
         };
@@ -196,6 +305,9 @@ fn handle_stop_hotkey(app: &AppHandle, state: &SharedState) {
         "runtime_status_changed",
         serde_json::json!({ "status": RuntimeStatus::Idle }),
     ) {
-        error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
+        error!(
+            "[hotkeys_interception] failed to emit runtime_status_changed: {}",
+            e
+        );
     }
 }

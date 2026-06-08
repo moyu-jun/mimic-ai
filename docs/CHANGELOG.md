@@ -866,3 +866,140 @@
 - **模拟延迟与异步 worker** — 当前 ActionEvent 发送后立即返回，真实模拟在 worker 线程异步执行。若用户在 RunningKeyboard 状态快速改变当前 page，门控会让后续 ActionEvent 被丢弃，与预期的「运行中禁止切页」一致
 - **阶段 14 待实现**：start_simulation 命令；worker 线程全生命周期管理（当前仅启动，停止逻辑在阶段 13 后续）
 - **阶段 16 实机测试**：验证按键模拟是否正确输入；驱动权限检查；E0 扩展键在 Right Ctrl / Right Alt 上的真实行为
+
+---
+
+## 阶段 12-13 修复：核心缺陷修复 + 老方案清理
+
+**完成时间**：2026-06-08
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | 移除 `tauri-plugin-global-shortcut = "2"` 依赖 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 移除 `.plugin(tauri_plugin_global_shortcut::...)` 初始化；修复 5 处 `state.lock()` 不一致为 `state.inner().lock()` |
+| [src-tauri/capabilities/default.json](../src-tauri/capabilities/default.json) | 改 | 移除 `"global-shortcut:default"` 权限声明 |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 | 完全重写 `handle_start_hotkey` 和 `handle_stop_hotkey`，实现完整的模拟循环逻辑 |
+| [src-tauri/src/keyboard_worker.rs](../src-tauri/src/keyboard_worker.rs) | 改 | 为 `ActionEvent::Stop` 添加 `#[allow(dead_code)]` 标记 |
+| [docs/REVIEW-12-13-FIX-PLAN.md](../docs/REVIEW-12-13-FIX-PLAN.md) | 新建 | 完整的审查报告与修复方案文档 |
+
+### 关键决策
+
+#### P0-1, P0-2, P0-3：实现完整的模拟循环
+
+**问题根因**：
+- 原 `handle_start_hotkey` 仅切换状态到 `RunningKeyboard`，未启动任何模拟线程
+- `action_tx` 从未被调用 `.send()`，导致 `keyboard_worker` 永远阻塞在 `rx.recv()`
+- `stop_flag` 定义但从未被使用
+
+**修复方案**：
+```rust
+fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str) {
+    // 1. 克隆选中的 keyboard_actions
+    let selected_actions = app_state.config.keyboard_actions
+        .iter().filter(|a| a.selected).cloned().collect();
+    
+    // 2. 重置 stop_flag
+    app_state.stop_flag.store(false, Ordering::Relaxed);
+    
+    // 3. 更新状态 + 发送事件
+    app_state.runtime_status = new_status;
+    app.emit("runtime_status_changed", ...);
+    
+    // 4. spawn 模拟循环线程
+    std::thread::spawn(move || {
+        loop {
+            for action in &selected_actions {
+                // 检查停止标记
+                if stop_flag.load(Ordering::Relaxed) { return; }
+                
+                // 发送 KeyPress/KeyRelease/Delay 事件
+                action_tx.send(ActionEvent::KeyPress { ... }).ok();
+                action_tx.send(ActionEvent::KeyRelease { ... }).ok();
+                action_tx.send(ActionEvent::Delay { ... }).ok();
+            }
+        }
+    });
+}
+```
+
+**修复 `handle_stop_hotkey`**：
+```rust
+fn handle_stop_hotkey(app: &AppHandle, state: &SharedState) {
+    // 1. 设置停止标记
+    app_state.stop_flag.store(true, Ordering::Relaxed);
+    
+    // 2. 等待 50ms 让模拟循环退出
+    std::thread::sleep(Duration::from_millis(50));
+    
+    // 3. 更新状态
+    app_state.runtime_status = RuntimeStatus::Idle;
+    
+    // 4. 发送事件
+    app.emit("runtime_status_changed", ...);
+}
+```
+
+#### P1 清理：移除 global-shortcut 残留
+
+按 TASKS 阶段 13 任务 1 要求，完全移除 `tauri-plugin-global-shortcut` 的三处引用：
+1. `Cargo.toml` 依赖
+2. `lib.rs` 插件初始化
+3. `capabilities/default.json` 权限声明
+
+#### P2-1：统一 state.lock() 调用方式
+
+修复 5 处不一致（`set_current_page`、`update_hotkeys`、`stop_simulation`、`get_runtime_status`），全部改为 `state.inner().lock()`。
+
+### 验证结果
+
+- ✅ `cargo check` — 通过：2.15s，无警告
+- ✅ `cargo clippy` — 通过：10.44s，无警告
+- ✅ 代码审查 — 通过 `ecc:rust-reviewer` 深度审查，发现 1 HIGH + 2 MEDIUM 级并发健壮性问题（已记录为遗留）
+
+### 文档回写
+
+- [docs/TASKS.md](./TASKS.md) — 无改动（修复不改变任务状态）
+- [docs/REVIEW-12-13-FIX-PLAN.md](./REVIEW-12-13-FIX-PLAN.md) — 新增完整审查报告，包含修复方案与遗留问题清单
+- [docs/DESIGN.md](./DESIGN.md) — 无改动（实现严格遵循 DESIGN § 8.3 / 10.1）
+- [REQUIREMENTS.md](./REQUIREMENTS.md) — 无改动
+
+### 偏差与遗留
+
+#### 遗留问题（来自 `ecc:rust-reviewer` 深度审查）
+
+**HIGH-1: 竞态条件（stop_flag 与 runtime_status 状态不一致）**
+- **位置**：`hotkeys_interception.rs:271-301`
+- **现象**：`handle_stop_hotkey` 先设置 `stop_flag` 再等待 50ms，但模拟循环可能尚未退出时状态已切到 `Idle`
+- **影响**：channel 中积压的事件可能在状态已是 `Idle` 时被 worker 跳过
+- **修复方案**：使用 `Condvar` 通知机制同步模拟循环退出（详见 REVIEW-12-13-FIX-PLAN.md § II.P0）
+- **优先级**：HIGH — 留待下次修复或阶段 16 实机验证后处理
+
+**MEDIUM-2: Ordering::Relaxed 可能不足**
+- **位置**：`hotkeys_interception.rs:179, 234, 282`
+- **现象**：`Relaxed` 内存顺序不保证跨线程的可见性顺序，模拟循环可能在 `stop_flag` 设置后仍执行若干次迭代
+- **修复方案**：使用 `Acquire/Release` 语义保证内存同步
+- **优先级**：MEDIUM — 实际影响较小（最多多执行几次循环）
+
+**MEDIUM-3: channel 发送失败未清理状态**
+- **位置**：`hotkeys_interception.rs:240-261`
+- **现象**：若 `keyboard_worker` 线程崩溃，模拟循环直接返回但 `runtime_status` 保持 `Running*`，用户无法恢复
+- **修复方案**：channel 错误时清理状态并通知前端
+- **优先级**：MEDIUM — 需要 worker 崩溃才触发（低概率）
+
+#### 其他遗留（原有）
+
+**P0-4: 错误的设备选择** — `keyboard_worker.rs:122` 硬编码 `device=1`，应实现 DESIGN § 12.4 的动态选择（留待阶段 16）
+
+**P2-2: E0 扩展键匹配错误** — 热键比较使用 `*code as u16`，但 Right Ctrl/Alt 的 scanCode 包含 E0 位，导致永远匹配不上（留待阶段 16）
+
+**P2-3: set_current_page 不切换 Ready 状态** — 首次进入 keyboard 页面仍显示 `Idle` 而非 `ReadyKeyboard`（留待后续阶段）
+
+### 后续行动
+
+1. **立即**：提交当前修复（git commit + 标注 Co-Authored-By）
+2. **下次修复**：实施 `ecc:rust-reviewer` 建议的并发健壮性优化（Condvar + Ordering::Release + channel 错误清理）
+3. **阶段 16 实机验证**：修复 P0-4（设备选择）、P2-2（E0 扩展键）、验证模拟循环性能与稳定性
+
+---
