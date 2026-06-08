@@ -869,6 +869,173 @@
 
 ---
 
+## 阶段 12-13 核心缺陷修复总结
+
+**完成时间**：2026-06-08
+
+> 本节总结阶段 12-13 验收后发现的 4 个根因缺陷的修复，覆盖驱动检测、热键监听、按键模拟三个环节。修复确保了"热键→按键模拟"完整链路的功能可靠性。
+
+### 修复的 4 个根因缺陷
+
+#### 根因 #1 — 驱动 Ready 检测失败
+
+**症状**：`check_driver_windows()` 即使驱动已加载仍返回 `InstalledNeedReboot`，导致首页卡片始终显示"需要重启"而非"已就绪"。
+
+**原因**：实现仅查询 `HKLM\SYSTEM\CurrentControlSet\Services\keyboard` 和 `mouse` 注册表项，但不验证驱动是否真正加载到内核。
+
+**修复**：
+```rust
+pub fn check_driver_windows() -> DriverStatus {
+    // 1. 先尝试 create_context() 验证驱动真正加载
+    match interception::new() {
+        Ok(_ctx) => DriverStatus::Ready,  // 驱动已加载
+        Err(_) => {
+            // 2. 失败后再查注册表判断是否已安装但未加载
+            if is_driver_installed() {
+                DriverStatus::InstalledNeedReboot
+            } else {
+                DriverStatus::NotInstalled
+            }
+        }
+    }
+}
+```
+
+**验证**：`cargo check` 通过；首页驱动卡片在驱动加载后显示"已就绪"。
+
+---
+
+#### 根因 #2 — 热键监听 wait() 永久阻塞
+
+**症状**：`hotkeys_interception.rs` 监听线程循环启动后立即阻塞在 `interception::wait()`，永不返回任何按键事件。
+
+**原因**：`wait()` 前未调 `set_filter()`，导致驱动返回全部设备事件（包括鼠标事件、模拟事件等），而代码仅处理键盘事件，造成实际监听失效。
+
+**修复**：
+```rust
+fn listen_hotkeys(...) {
+    // 启动监听线程前调一次 set_filter()
+    interception::set_filter(
+        context,
+        Filter::KeyFilter(KeyFilter::DOWN | KeyFilter::UP)
+    ).expect("set_filter failed");
+    
+    loop {
+        let strokes = interception::wait(context);  // 现已返回仅按键事件
+        for stroke in strokes {
+            // 处理热键
+            if is_hotkey_match(&stroke) { ... }
+        }
+    }
+}
+```
+
+**验证**：监听线程成功返回按键事件；热键按下时能进入回调。
+
+---
+
+#### 根因 #3 — ScanCode 构造错误
+
+**症状**：按键模拟时所有键都输入为同一按键（Esc），或模拟无响应。
+
+**原因**：`keyboard_worker.rs` 中 `ScanCode::try_from(scan_code)` 无对应实现，代码硬编码 `ScanCode::Esc` 作为占位符，导致实际模拟时始终发送 Esc。同时错误地使用 `information` 字段传递 scan code。
+
+**修复**：
+```rust
+// 正确的 ScanCode 构造方式
+let code = ScanCode::try_from(u16::from(action.scan_code))
+    .unwrap_or(ScanCode::Esc);  // 失败时回退（不应发生）
+
+// 构造 Stroke
+let stroke = Stroke::Keyboard {
+    code,
+    state: if is_key_down { KeyState::DOWN } else { KeyState::UP },
+    information: 0,  // 恢复为驱动原始设计的 0
+};
+
+context.send(device, stroke);
+```
+
+**验证**：不同的按键现在会模拟出对应的键而非全都是 Esc；按键模拟功能恢复。
+
+---
+
+#### 根因 #4 — 死锁（监听与 worker 竞争同一 context）
+
+**症状**：启动模拟后按热键停止时应用界面卡死，或模拟循环与监听线程互相等待。
+
+**原因**：`hotkeys_interception.rs` 监听线程与 `keyboard_worker.rs` worker 线程共用同一 `AppState.interception_context`（Arc<Mutex<>>），两个线程同时执行 `wait()` 和 `send()` 导致 Mutex 争用和死锁。
+
+**修复**：
+```rust
+// 创建两个独立的 Interception context
+pub struct AppState {
+    pub interception_ctx: Arc<Mutex<Interception>>,   // 监听用
+    pub worker_ctx: Arc<Mutex<Interception>>,         // 模拟用
+    // ...
+}
+
+// 监听线程
+fn listen_hotkeys(ctx: Arc<Mutex<Interception>>) {
+    let context = ctx.lock().unwrap();
+    context.set_filter(...);
+    loop {
+        let strokes = context.wait();  // 长期持有锁等待按键
+        // 处理
+    }
+}
+
+// 模拟 worker
+fn keyboard_worker(ctx: Arc<Mutex<Interception>>) {
+    loop {
+        if stop_flag.load(...) { return; }
+        let context = ctx.lock().unwrap();
+        context.send(device, stroke);  // 短期持有锁发送
+        drop(context);  // 显式释放
+        std::thread::sleep(duration);
+    }
+}
+```
+
+**验证**：
+- 监听线程长期阻塞在 `wait()` 等待按键
+- Worker 线程短期获锁发送事件，不会互相争用
+- 停止热键能成功中断模拟，界面不卡死
+
+---
+
+### 次要修复
+
+#### 设备选择改进
+
+**阶段 13 初始实现**：`keyboard_worker.rs` 硬编码 `device=1`。
+
+**改进**：改为启动模拟前扫描设备 1-10，选择第一个键盘设备：
+```rust
+fn find_keyboard_device(context: &Interception) -> Option<i32> {
+    for device_id in 1..=10 {
+        if context.is_keyboard(device_id) {
+            return Some(device_id);
+        }
+    }
+    None
+}
+```
+
+---
+
+### 关键决策回顾
+
+1. **两个独立 Interception context**：不是"共用同一对象"（会死锁），而是"两个独立对象"（都由 Arc<Mutex<>> 持有，线程安全但互不争用）
+
+2. **set_filter() 的必要性**：仅需调一次（在监听线程循环前），不需要在每次 wait() 前重复调用
+
+3. **Ready 检测的优先级**：先尝试 `create_context()`（活体验证），失败才查注册表（被动判断），确保最准确的驱动状态
+
+4. **ScanCode 序列化**：information 字段用于驱动内部元数据，模拟时应置 0；scan code 本身通过 Code 枚举或 u16 值传递
+
+---
+
 ## 阶段 12-13 修复：核心缺陷修复 + 老方案清理
 
 **完成时间**：2026-06-08

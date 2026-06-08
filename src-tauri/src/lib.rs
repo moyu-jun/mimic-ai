@@ -366,19 +366,37 @@ pub fn run() {
             log::info!("[setup] driver status: {:?}", driver_status);
 
             // 初始化 Interception 上下文 — DESIGN 8.3 / 阶段 13
+            // 监听线程 context（设置 filter + wait）
             let interception_ctx = if matches!(&driver_status, state::DriverStatus::Ready) {
                 match interception::Interception::new() {
                     Some(ctx) => {
-                        log::info!("[setup] Interception context created");
+                        log::info!("[setup] Interception listener context created");
                         Arc::new(Mutex::new(Some(SendInterception(ctx))))
                     }
                     None => {
-                        log::error!("[setup] Interception context creation failed");
+                        log::error!("[setup] Interception listener context creation failed");
                         Arc::new(Mutex::new(None))
                     }
                 }
             } else {
-                log::warn!("[setup] Interception not ready, context not created");
+                log::warn!("[setup] Interception not ready, listener context not created");
+                Arc::new(Mutex::new(None))
+            };
+
+            // worker 独立注入 context（仅用于 send，避免死锁）— 修复根因 #4
+            let worker_ctx = if matches!(&driver_status, state::DriverStatus::Ready) {
+                match interception::Interception::new() {
+                    Some(ctx) => {
+                        log::info!("[setup] Interception worker context created");
+                        Arc::new(Mutex::new(Some(SendInterception(ctx))))
+                    }
+                    None => {
+                        log::error!("[setup] Interception worker context creation failed");
+                        Arc::new(Mutex::new(None))
+                    }
+                }
+            } else {
+                log::warn!("[setup] Interception not ready, worker context not created");
                 Arc::new(Mutex::new(None))
             };
 
@@ -412,7 +430,7 @@ pub fn run() {
                 if let Err(e) = keyboard_worker::start_keyboard_worker(
                     action_rx,
                     shared_state.clone(),
-                    interception_ctx.clone(),
+                    worker_ctx.clone(),
                 ) {
                     log::error!("[setup] keyboard worker failed: {}", e);
                 } else {

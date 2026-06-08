@@ -22,6 +22,42 @@ pub fn start_hotkey_listener(
     std::thread::spawn(move || {
         info!("[hotkeys_interception] listener thread started");
 
+        // 设置键盘事件过滤器（仅一次，在循环外）
+        let filter_set = {
+            let ctx_guard = match ctx.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    error!("[hotkeys_interception] failed to lock context for filter: {}", e);
+                    return;
+                }
+            };
+
+            match ctx_guard.as_ref() {
+                Some(i) => {
+                    use interception::{Filter, KeyFilter};
+                    // Predicate: 匹配所有键盘设备
+                    extern "C" fn is_keyboard_device(device: i32) -> bool {
+                        interception::is_keyboard(device)
+                    }
+                    // 设置过滤器: DOWN + UP 事件
+                    i.0.set_filter(
+                        is_keyboard_device,
+                        Filter::KeyFilter(KeyFilter::DOWN | KeyFilter::UP),
+                    );
+                    info!("[hotkeys_interception] keyboard filter set");
+                    true
+                }
+                None => {
+                    error!("[hotkeys_interception] context not available for filter setup");
+                    false
+                }
+            }
+        };
+
+        if !filter_set {
+            return;
+        }
+
         loop {
             // 检查 context 是否可用
             let ctx_guard = match ctx.lock() {

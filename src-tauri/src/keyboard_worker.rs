@@ -7,6 +7,7 @@
 use crate::state::{RuntimeStatus, SendInterception, SharedState};
 use interception::{KeyState, ScanCode, Stroke};
 use log::{error, info, warn};
+use std::convert::TryFrom;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
@@ -114,15 +115,30 @@ pub fn start_keyboard_worker(
                 key_state
             };
 
-            // 使用 Esc 作为占位符，真实 scan code 通过 information 字段传递
+            // 转换 u16 scan_code 为 ScanCode 枚举
+            let code = ScanCode::try_from(scan_code).unwrap_or_else(|_| {
+                warn!("[keyboard_worker] invalid scan_code {}, using Esc", scan_code);
+                ScanCode::Esc
+            });
+
             let stroke = Stroke::Keyboard {
-                code: ScanCode::Esc,
+                code,
                 state: state_flags,
-                information: scan_code as u32,
+                information: 0,
             };
 
-            // 发送到驱动（device=1 表示第一个键盘设备）
-            interception.send(1, &[stroke]);
+            // 扫描 1-10 找第一个键盘设备
+            let keyboard_device = (1..=10).find(|d| interception::is_keyboard(*d));
+            let device = match keyboard_device {
+                Some(d) => d,
+                None => {
+                    error!("[keyboard_worker] no keyboard device found");
+                    continue;
+                }
+            };
+
+            // 发送到驱动
+            interception.send(device, &[stroke]);
         }
 
         info!("[keyboard_worker] worker thread exited");

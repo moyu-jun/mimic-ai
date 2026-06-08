@@ -66,8 +66,13 @@ fn check_driver_windows() -> DriverStatus {
         RegCloseKey, RegOpenKeyExW, HKEY_LOCAL_MACHINE, KEY_READ,
     };
 
-    // Interception 注册两个服务：keyboard 和 mouse
-    // 只要有一个存在就认为驱动已安装
+    // 阶段 13：先尝试创建 context，成功则 Ready
+    if let Some(_ctx) = interception::Interception::new() {
+        log::info!("[driver] Interception context created successfully, driver ready");
+        return DriverStatus::Ready;
+    }
+
+    // Context 创建失败，检查注册表判断是否已安装但需重启
     let keyboard_path = encode_wide("SYSTEM\\CurrentControlSet\\Services\\keyboard");
     let mouse_path = encode_wide("SYSTEM\\CurrentControlSet\\Services\\mouse");
     let service_paths: &[&[u16]] = &[&keyboard_path, &mouse_path];
@@ -77,13 +82,8 @@ fn check_driver_windows() -> DriverStatus {
         let status =
             unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut hkey) };
         if status == 0 {
-            // 打开成功 → 服务项存在
             unsafe { RegCloseKey(hkey) };
-            log::info!("[driver] registry service key found, driver installed (may need reboot)");
-            // 阶段 13 接入 interception crate 后,这里改为尝试 create_context():
-            //   成功 → Ready
-            //   失败 → InstalledNeedReboot
-            // 当前阶段 11 无 interception 依赖，统一返回 InstalledNeedReboot
+            log::info!("[driver] registry service key found but context failed, need reboot");
             return DriverStatus::InstalledNeedReboot;
         }
     }

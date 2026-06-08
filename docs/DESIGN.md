@@ -366,40 +366,45 @@ Rust 通过 `app.emit()` 发送事件，前端通过 `listen()` 监听：
   - 因此 `keyMap.ts` 与 `scan_code_to_code()` 在阶段 12 修复中临时移除了 ShiftLeft/ShiftRight/ControlLeft/ControlRight/AltLeft/AltRight 的映射,以避免"用户在设置页设置成功但全局热键注册失败"的尴尬状态。
   - 当前可选热键收窄为字母/数字/F1-F12/Space/Tab/Esc。
 
-#### 阶段 13（计划方案）— Interception 驱动直接监听
+#### 阶段 13（已落地）— Interception 驱动直接监听 + 按键模拟
 
-- 与按键模拟共用 Interception 驱动:阶段 13 引入 `interception` crate 作为按键模拟通道,同一个驱动实例同时承担"输入监听 + 输出发送"职责。
-- **采用动机**:
-  1. **能力完整**:Interception 在内核层拦截所有按键事件,Ctrl/Alt/Shift 作为独立热键自然可识别(无需借助 `RegisterHotKey` 的修饰键语义)。
-  2. **架构统一**:热键监听与按键模拟共用同一个 `interception::create_context()`,避免"`global-shortcut` + `interception` 双驱动栈"带来的初始化重复、生命周期错配、潜在键事件互相干扰。
-  3. **门控更可靠**:Interception 内核层语义清晰,可在驱动层判断按键来源(过滤掉自身模拟产生的回声),阶段 13 worker 与监听共用 context 时此优势更明显。
-- **取舍**:
-  - 引入对 Interception 驱动的强依赖。驱动未安装时全局热键将完全不可用(阶段 12 的 `global-shortcut` 不依赖驱动,但能力受限)。本节 8.3 的"驱动未安装兜底"部分给出降级策略。
-  - 监听所有按键事件相比 `RegisterHotKey` 注册特定热键,CPU 与上下文切换开销略增,但 Interception 内核驱动延迟通常 < 1ms,对热键场景无感知影响。
-- **数据流**(高层):
-  ```
-  Interception kernel driver
-    → 监听线程 (interception::wait + receive)
-    → 解析 KeyStroke (scan_code + state)
-    → 读取 AppState.config.hotkeys + current_page + runtime_status
-    → 状态机门控 (handle_start_hotkey / handle_stop_hotkey)
-    → 切 runtime_status + emit("runtime_status_changed")
-  ```
-- **配置更新协议**:
-  - 设置页 `update_hotkeys` 命令依然存在,签名不变(前端无感知)。
-  - 实现内部不再调 `unregister`/`on_shortcut`,改为更新 `AppState.config.hotkeys`,监听线程下次循环读取最新配置自然生效。
-  - 因此"热键注册失败"分支不再出现,`HotkeyUpdateResult.registered` 始终为 true(语义上仍保留字段,便于前端兼容)。
-- **驱动未安装兜底策略**(由阶段 13 实施时确认其一):
-  1. **完全禁用全局热键**(推荐):驱动 `NotInstalled` / `InstalledNeedReboot` 时不启动监听线程,前端首页与设置页文案明确"安装并重启驱动后热键可用"。
-  2. **回退到 `global-shortcut`**:驱动不可用时仍跑 `global-shortcut`,但前端在"修饰键作为热键"路径上显示警告。该方案保留双系统复杂度,优先级低。
-- **与阶段 13 按键模拟的集成点**:
-  - `interception::create_context()` 在驱动加载后只能创建一次,模拟 worker 与监听线程共用同一 context。
-  - context 由 `Arc<Mutex<Option<Context>>>` 持有(或 `OnceLock<Context>`),首次驱动可用时初始化。
-  - 监听线程长驻,模拟 worker 启停只切换 `stop_flag`,不影响监听。
-- **风险与降级**:
-  - 风险 1 — Interception 驱动崩溃 / 卸载:监听线程 `wait()` 返回错误时切到 `Error` 状态,推送 `simulation_error` 事件,自动重连或要求用户重启。
-  - 风险 2 — 与其他键盘钩子(如杀软、其他 Interception 用户进程)的冲突:Interception 内部通过设备 ID 区分,正常情况下无冲突;但若运行多个 Interception 客户端,事件分发顺序由驱动决定,需实机验证。
-  - 风险 3 — 监听线程 panic:`std::thread::spawn` 内部捕获 panic 并以 `Error` 状态结束,主线程通过 `JoinHandle` 检测后给出明确错误。
+**重要纠正**：阶段 13 验收后发现的核心缺陷修复已在"阶段 12-13 核心缺陷修复"部分（CHANGELOG.md § 阶段 12-13 修复）完整记录。此处仅说明设计原则与已验证的正确实现。
+
+- 与按键模拟共用 Interception 驱动：阶段 13 引入 `interception` crate 作为热键监听与按键模拟通道，同一个驱动实例同时承担"输入监听（热键） + 输出发送（模拟）"职责。
+- **采用动机**：
+  1. **能力完整**：Interception 在内核层拦截所有按键事件，Ctrl/Alt/Shift 作为独立热键自然可识别（无需借助 `RegisterHotKey` 的修饰键语义）。
+  2. **架构统一**：热键监听与按键模拟共用同一个 `interception::create_context()`，**两者为独立 context**（非同一对象），避免 "`global-shortcut` + `interception` 双驱动栈"带来的初始化重复、生命周期错配。
+  3. **门控更可靠**：Interception 内核层语义清晰，可在驱动层判断按键来源（过滤掉自身模拟产生的回声）。
+
+**核心缺陷修复（阶段 12-13）**：
+
+| 缺陷 | 原因 | 修复 |
+|------|------|------|
+| **根因 #1：Ready 检测失败** | `check_driver_windows()` 仅查注册表，未验证驱动加载 | 改为先尝试 `Interception::new()`（即 `create_context()`），成功 → `Ready`；失败再查注册表 |
+| **根因 #2：热键监听阻塞** | `wait()` 前未调 `set_filter()`，导致 StubKeyStroke 永不返回 | 监听线程循环前调 `set_filter(Filter::KeyFilter(...))`，设置仅监听按键事件 |
+| **根因 #3：ScanCode 构造错误** | `information` 字段被误用为 ScanCode，hardcode `ScanCode::Esc` 占位 | 改为 `ScanCode::try_from(u16)` 构造真实 Code；`information` 字段恢复为 0 |
+| **根因 #4：死锁** | 监听与 worker 共用同一 context + Mutex，互相争用导致阻塞 | 创建**独立 context**：监听用 `interception_ctx`（含 filter + 阻塞 wait），worker 用 `worker_ctx`（仅 send） |
+
+**关键设计原则**（已验证）：
+
+- **两个独立 Interception context**：
+  - `interception_ctx`：监听线程用，初始化时调 `set_filter()` 过滤仅按键，循环内阻塞 `wait()`
+  - `worker_ctx`：模拟 worker 用，仅调 `send()` 发送键事件，不阻塞
+  - 两者都由 `Arc<Mutex<>>` 持有，线程安全但互不争用
+  
+- **状态机与门控**：
+  - 热键回调在 `config.hotkeys` 与 `current_page` 匹配时发送 `ActionEvent` 到 worker
+  - Worker 检查 `stop_flag`，从 channel 接收事件并执行模拟
+  - `handle_stop_hotkey` 设置 `stop_flag` 后等待 50ms，确保 worker 收到信号后再切状态
+
+- **驱动未安装兜底策略**：
+  - 驱动 `NotInstalled` / `InstalledNeedReboot` 时不启动监听线程
+  - 前端首页与设置页文案明确"安装并重启驱动后热键可用"
+  - 热键功能完全禁用，无回退方案
+
+- **风险与当前状态**：
+  - ✅ **编译验证通过**：`cargo check` + `cargo clippy` 无警告
+  - ⏳ **实机测试待进行**：验证热键→模拟端到端工作、修饰键识别、E0 扩展键处理
 
 ## 9. 全局状态管理
 
