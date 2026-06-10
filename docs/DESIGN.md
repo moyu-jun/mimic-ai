@@ -545,22 +545,27 @@ fn run_mouse_simulation(
 - **命令**：`start_pick_mouse_position(row_id: String)`
 - **事件**：`mouse_position_picked { row_id, x, y }`
 
-### 11.2 第一版实现方案
+### 11.2 实现方案（2026-06-10 更新：改用 Interception 驱动监听）
+
+> **方案变更**：原 `WH_MOUSE_LL` 用户态 hook 在独占全屏游戏（DirectX exclusive fullscreen）内失效——游戏直接从驱动层取输入，绕过用户态 hook。即使提权到管理员也无效。改用 Interception 内核驱动监听，在驱动层捕获左键，全屏游戏内同样有效，且普通权限即可（驱动已工作在内核态）。
 
 - 进入拾取时将 `runtime_status` 置为 `PickingMouse` 并推送 `runtime_status_changed`；此状态下受守卫命令被拒绝（见 6.1）。
-- 调用 Windows API `SetWindowsHookExW` 注册 low-level mouse hook (`WH_MOUSE_LL`)。
-- 隐藏 Tauri 窗口（`app_handle.get_window("main").unwrap().hide()`）。
-- 监听下一次鼠标**左键**点击事件（仅左键触发，右键/中键忽略），获取屏幕坐标（对应反馈 Q4）。
-- 取消 hook，恢复显示窗口，状态恢复为 `ReadyMouse`，发送 `mouse_position_picked` 事件。
+- 隐藏 Tauri 窗口（`get_webview_window("main").hide()`）。
+- 复用 `AppState.interception_worker` context，在其上设置鼠标 filter（仅 `MouseFilter::LEFT_BUTTON_DOWN`）。
+- 拾取线程循环 `wait_with_timeout(100ms)`：超时则继续等待，命中鼠标设备则 `receive` 并透传（保持目标窗口点击行为不变）。
+- 检测到 `LEFT_BUTTON_DOWN` 时，用 `GetCursorPos` 读取系统光标屏幕坐标（Interception stroke 的 x/y 是移动量而非屏幕坐标）。
+- **清除 filter**（`MouseFilter::empty()`）→ 恢复并聚焦窗口（marshal 到主线程 `run_on_main_thread`）→ 状态回 `ReadyMouse` → 发送 `mouse_position_picked`。
 - 前端收到事件后回填对应行 X/Y 并持久化。
-- **第一版约束**（对应反馈 Q10/L13）：仅支持单显示器、标准 DPI 场景，不考虑多显示器坐标错位问题。
-- **拾取期间无取消机制**（对应反馈 Q5）：用户只能通过左键点击完成拾取，或关闭窗口退出应用。
-- **异常处理**：若拾取过程中发生错误（如 hook 注册失败），状态应恢复为 `ReadyMouse` 并发送 `simulation_error` 事件。
+- **context 独占安全**：拾取期间状态为 `PickingMouse`，`mouse_worker` / `keyboard_worker` 的状态门控使其不发送，故拾取线程全程持有 worker context 锁是安全的。
+- **窗口恢复线程亲和性**：窗口在主线程创建，从拾取后台线程直接 `show()`/`set_focus()` 受 Windows 前台锁定限制不可靠，必须 `run_on_main_thread` marshal 回主线程执行。
+- **第一版约束**（对应反馈 Q10/L13）：仅支持单显示器、标准 DPI 场景。
+- **拾取期间无取消机制**（对应反馈 Q5）：用户只能通过左键点击完成拾取。
+- **异常处理**：context 不可用 / `GetCursorPos` 失败时，清除 filter（best-effort）+ 恢复窗口 + 状态回 `ReadyMouse` + 发送 `simulation_error`。
 
-### 11.3 替代方案（如第一版不可用）
+### 11.3 历史方案（已弃用）
 
-- 使用 Interception 监听鼠标事件（需要确认 Interception 是否支持读取鼠标绝对坐标）。
-- 使用第三方库如 `rdev` 监听全局鼠标事件。
+- ~~第一版：`SetWindowsHookExW` + `WH_MOUSE_LL` 用户态 hook + 消息循环~~ → 全屏游戏内失效，已于 2026-06-10 替换为 11.2 的 Interception 方案。
+- 备选：第三方库如 `rdev` 监听全局鼠标事件（未采用，Interception 已满足需求）。
 
 ## 12. Interception 驱动集成
 

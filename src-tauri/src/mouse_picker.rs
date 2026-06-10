@@ -1,21 +1,29 @@
 // 鼠标坐标拾取 — DESIGN 11.2 / TASKS 阶段 14
 //
-// 第一版方案（单显示器 + 标准 DPI）：
+// 拾取机制（2026-06-10 改用 Interception）：
+//   - 原方案用 WH_MOUSE_LL 用户态 hook，独占全屏游戏（DirectX exclusive fullscreen）
+//     直接从驱动层取输入，绕过用户态 hook，导致拾取在全屏游戏内失效。
+//   - 新方案复用 Interception 内核驱动监听鼠标：在驱动层捕获左键，全屏游戏同样有效，
+//     且普通权限即可（驱动已工作在内核态，不需要调用方提权）。
+//
+// 流程：
 //   - 进入拾取时状态置 PickingMouse 并推送 runtime_status_changed
 //   - 隐藏主窗口，避免遮挡目标点击区域
-//   - 注册 WH_MOUSE_LL low-level mouse hook，仅左键触发（右/中键忽略）
-//   - 捕获到左键点击：取消 hook → 恢复窗口 → 状态回 ReadyMouse → 发 mouse_position_picked
-//   - hook 注册失败：恢复窗口 + 状态，发 simulation_error
+//   - 在 worker context 上设置鼠标 filter（仅 LEFT_BUTTON_DOWN），循环 wait_with_timeout
+//   - 捕获到左键：用 GetCursorPos 读屏幕坐标 → 透传点击 → 清除 filter
+//     → 恢复窗口 → 状态回 ReadyMouse → 发 mouse_position_picked
+//   - context 不可用或异常：清除 filter（best-effort）+ 恢复窗口 + 发 simulation_error
 //
-// low-level 鼠标钩子由系统在「安装它的线程」上回调，且该线程必须持有消息循环。
-// 因此拾取在独立线程内完成：安装 hook → GetMessageW 循环 → 命中后 PostQuitMessage 退出循环。
-// 同一时刻只允许一次拾取（由 lib.rs 命令的运行态守卫保证），故用静态原子量在
-// C 回调与循环线程间传递坐标是安全的。
+// 设备/坐标说明：
+//   - Interception 鼠标 stroke 的 x/y 是相对/绝对移动量，不是屏幕坐标，
+//     故命中后用 GetCursorPos 读取系统光标位置作为拾取结果。
+//   - 拾取期间状态为 PickingMouse，mouse_worker / keyboard_worker 的状态门控
+//     使其不发送，故拾取线程独占 worker context 设置 filter 是安全的。
 
 use crate::state::{RuntimeStatus, SharedState};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// 拾取入口 — 切状态 + 隐藏窗口 + 启动 hook 线程。
+/// 拾取入口 — 切状态 + 隐藏窗口 + 启动 Interception 监听线程。
 ///
 /// 运行态守卫由调用方（lib.rs 命令）负责，此处假定已处于可拾取状态。
 pub fn start_pick_mouse_position(
@@ -24,6 +32,15 @@ pub fn start_pick_mouse_position(
     row_id: String,
 ) -> Result<(), String> {
     log::info!("[mouse_picker] start picking for row {}", row_id);
+
+    // 拾取需要 worker context（Interception 监听）。提前取出，None 直接报错返回。
+    #[cfg(windows)]
+    let worker_ctx = {
+        let app_state = state
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        app_state.interception_worker.clone()
+    };
 
     // 1. 状态置 PickingMouse
     {
@@ -43,11 +60,11 @@ pub fn start_pick_mouse_position(
         log::warn!("[mouse_picker] main window not found, picking without hiding");
     }
 
-    // 3. 启动 hook 线程
+    // 3. 启动 Interception 监听线程
     #[cfg(windows)]
     {
         std::thread::spawn(move || {
-            windows_impl::run_picker(app, state, row_id);
+            windows_impl::run_picker(app, state, row_id, worker_ctx);
         });
     }
 
@@ -123,87 +140,132 @@ fn restore_with_error(app: &AppHandle, state: &SharedState, error: &str) {
 #[cfg(windows)]
 mod windows_impl {
     use super::{restore_window_and_ready, restore_with_error};
-    use crate::state::SharedState;
-    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use crate::state::{SendInterception, SharedState};
+    use interception::{Filter, MouseFilter, MouseState, Stroke};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tauri::{AppHandle, Emitter};
     use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
-        UnhookWindowsHookEx, HC_ACTION, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_LBUTTONDOWN,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
-    // C 回调与循环线程间的坐标传递。同一时刻只有一次拾取，静态量安全。
-    static PICKED_X: AtomicI32 = AtomicI32::new(0);
-    static PICKED_Y: AtomicI32 = AtomicI32::new(0);
-    static CAPTURED: AtomicBool = AtomicBool::new(false);
-
-    /// low-level 鼠标钩子回调 — 仅左键按下触发。
-    ///
-    /// 命中后记录屏幕坐标、置 CAPTURED，并 PostQuitMessage 使循环线程退出。
-    /// 点击事件透传（不消费），保持目标窗口行为不变（DESIGN 11.2）。
-    unsafe extern "system" fn low_level_mouse_proc(
-        code: i32,
-        wparam: usize,
-        lparam: isize,
-    ) -> isize {
-        if code == HC_ACTION as i32 && wparam == WM_LBUTTONDOWN as usize {
-            let info = &*(lparam as *const MSLLHOOKSTRUCT);
-            let pt: POINT = info.pt;
-            PICKED_X.store(pt.x, Ordering::SeqCst);
-            PICKED_Y.store(pt.y, Ordering::SeqCst);
-            CAPTURED.store(true, Ordering::SeqCst);
-            windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
-        }
-        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    /// 匹配所有鼠标设备的 predicate。
+    extern "C" fn is_mouse_device(device: i32) -> bool {
+        interception::is_mouse(device)
     }
 
-    /// 在独立线程内执行：安装 hook → 消息循环 → 取消 hook → 回填结果。
-    pub fn run_picker(app: AppHandle, state: SharedState, row_id: String) {
-        CAPTURED.store(false, Ordering::SeqCst);
-
-        unsafe {
-            let hmodule = GetModuleHandleW(std::ptr::null());
-            let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(low_level_mouse_proc), hmodule, 0);
-            if hook.is_null() {
-                restore_with_error(&app, &state, "SetWindowsHookExW failed");
+    /// 在独立线程内执行：设置鼠标 filter → 等待左键按下 → 读坐标 → 清 filter → 回填。
+    ///
+    /// 复用 worker context（Interception 内核驱动），在驱动层捕获左键，
+    /// 独占全屏游戏内同样有效，且不需要管理员权限。
+    pub fn run_picker(
+        app: AppHandle,
+        state: SharedState,
+        row_id: String,
+        ctx: Arc<Mutex<Option<SendInterception>>>,
+    ) {
+        // 全程持有 context 锁：拾取期间状态为 PickingMouse，worker 不发送，独占安全。
+        let ctx_guard = match ctx.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                restore_with_error(&app, &state, &format!("failed to lock context: {}", e));
                 return;
             }
+        };
 
-            // 消息循环：hook 回调 PostQuitMessage 后 GetMessageW 返回 0，循环退出。
-            let mut msg: MSG = std::mem::zeroed();
-            loop {
-                let ret = GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0);
-                if ret <= 0 {
-                    // 0 = WM_QUIT（正常命中退出）；-1 = 错误
-                    break;
-                }
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+        let interception = match ctx_guard.as_ref() {
+            Some(i) => &i.0,
+            None => {
+                restore_with_error(
+                    &app,
+                    &state,
+                    "Interception context not available (driver not ready)",
+                );
+                return;
+            }
+        };
+
+        // 设置鼠标 filter：仅监听左键按下事件。
+        interception.set_filter(
+            is_mouse_device,
+            Filter::MouseFilter(MouseFilter::LEFT_BUTTON_DOWN),
+        );
+        log::info!("[mouse_picker] mouse filter set, waiting for left click");
+
+        // 循环等待左键按下；wait_with_timeout 返回 0 = 超时，>0 = 命中设备号。
+        let mut captured: Option<(i32, i32)> = None;
+        let mut error: Option<String> = None;
+
+        loop {
+            let device = interception.wait_with_timeout(Duration::from_millis(100));
+            if device == 0 {
+                // 超时，继续等待（用户尚未点击）。
+                continue;
+            }
+            if !interception::is_mouse(device) {
+                continue;
             }
 
-            UnhookWindowsHookEx(hook);
+            let mut strokes = [Stroke::Mouse {
+                state: MouseState::empty(),
+                flags: interception::MouseFlags::empty(),
+                rolling: 0,
+                x: 0,
+                y: 0,
+                information: 0,
+            }; 16];
+
+            let count = interception.receive(device, &mut strokes);
+            if count == 0 {
+                continue;
+            }
+
+            let mut hit = false;
+            for stroke in strokes.iter().take(count as usize) {
+                // 透传事件，保持目标窗口点击行为不变。
+                interception.send(device, &[*stroke]);
+                if let Stroke::Mouse { state: ms, .. } = stroke {
+                    if ms.contains(MouseState::LEFT_BUTTON_DOWN) {
+                        hit = true;
+                    }
+                }
+            }
+
+            if hit {
+                // 用 GetCursorPos 读屏幕坐标（Interception stroke 不含屏幕坐标）。
+                let mut pt = POINT { x: 0, y: 0 };
+                let ok = unsafe { GetCursorPos(&mut pt) };
+                if ok != 0 {
+                    captured = Some((pt.x, pt.y));
+                } else {
+                    error = Some("GetCursorPos failed".to_string());
+                }
+                break;
+            }
         }
 
-        if CAPTURED.load(Ordering::SeqCst) {
-            let x = PICKED_X.load(Ordering::SeqCst);
-            let y = PICKED_Y.load(Ordering::SeqCst);
-            log::info!(
-                "[mouse_picker] picked ({}, {}) for row {}",
-                x,
-                y,
-                row_id
-            );
-            restore_window_and_ready(&app, &state);
-            if let Err(e) = app.emit(
-                "mouse_position_picked",
-                serde_json::json!({ "rowId": row_id, "x": x, "y": y }),
-            ) {
-                log::error!("[mouse_picker] failed to emit mouse_position_picked: {}", e);
+        // 清除 filter，恢复 worker context 正常状态（关键：否则会持续拦截鼠标）。
+        interception.set_filter(is_mouse_device, Filter::MouseFilter(MouseFilter::empty()));
+        log::info!("[mouse_picker] mouse filter cleared");
+        drop(ctx_guard);
+
+        match captured {
+            Some((x, y)) => {
+                log::info!("[mouse_picker] picked ({}, {}) for row {}", x, y, row_id);
+                restore_window_and_ready(&app, &state);
+                if let Err(e) = app.emit(
+                    "mouse_position_picked",
+                    serde_json::json!({ "rowId": row_id, "x": x, "y": y }),
+                ) {
+                    log::error!("[mouse_picker] failed to emit mouse_position_picked: {}", e);
+                }
             }
-        } else {
-            // 循环异常退出（GetMessageW 返回 -1）且未捕获坐标
-            restore_with_error(&app, &state, "message loop exited without capture");
+            None => {
+                restore_with_error(
+                    &app,
+                    &state,
+                    error.as_deref().unwrap_or("picking ended without capture"),
+                );
+            }
         }
     }
 }

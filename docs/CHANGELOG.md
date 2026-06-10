@@ -1604,3 +1604,46 @@ pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
 - **首次启动驱动未安装时的 UX 路径**：用户需「以管理员身份重启 → 安装驱动 → 重启电脑」，三步操作。如未来需精简，可考虑首次启动检测到「未安装 + 非管理员」时主动提示，但当前策略以「不打扰」为优先。
 
 ---
+
+## 阶段 16.4：坐标拾取改用 Interception — 支持全屏游戏
+
+**完成时间**：2026-06-10
+
+**触发原因**：用户反馈在独占全屏游戏内点击坐标拾取的左键无法被捕获（无日志），切到 IDE 窗口后点击才成功。确认根因为 `WH_MOUSE_LL` 用户态 hook 被全屏游戏绕过，与管理员权限无关。用户要求普通权限下也能在全屏游戏内拾取。
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/mouse_picker.rs](../src-tauri/src/mouse_picker.rs) | 改 | 整体替换拾取机制：删除 `WH_MOUSE_LL` hook + 消息循环 + 静态原子量；改为复用 `interception_worker` context，设鼠标 filter（仅 `LEFT_BUTTON_DOWN`）+ `wait_with_timeout` 循环 + `GetCursorPos` 读坐标 + 透传点击 + 清 filter；`start_pick_mouse_position` 从 state 取出 worker context 传给拾取线程 |
+| [docs/DESIGN.md](./DESIGN.md) | 改 | § 11.2 重写为 Interception 方案，§ 11.3 原 hook 方案标记为已弃用 |
+
+### 关键决策
+
+- **为何 hook 失效**：独占全屏游戏（DirectX exclusive fullscreen）直接从驱动/Raw Input 层取输入，`WH_MOUSE_LL` 是用户态 hook，处于游戏取输入路径之后，故捕获不到。提权管理员也无法解决（hook 层级问题，非权限问题）。
+- **为何 Interception 有效**：Interception 是内核态驱动，工作在输入栈最底层，全屏游戏的输入同样经过它。驱动一旦加载，用户态调用 `set_filter`/`wait`/`receive` 不需要管理员权限。
+- **复用 worker context 而非新建**：拾取期间状态为 `PickingMouse`，worker 状态门控使其不发送，拾取线程独占该 context 设 filter 安全；避免新建 context 的资源开销。
+- **坐标来源用 `GetCursorPos`**：Interception 鼠标 stroke 的 x/y 是移动量（相对/绝对归一化），非屏幕像素坐标。命中左键时读系统光标位置作为拾取结果。
+- **filter 必须清除**：拾取结束后用 `MouseFilter::empty()` 清除，否则 worker context 会持续拦截鼠标事件，影响后续鼠标模拟与正常使用。
+- **透传点击事件**：`receive` 后立即 `send` 回去，保持用户在目标窗口的点击行为不变（与原 hook 透传语义一致）。
+
+### 验证结果
+
+- ✅ `cargo build` 通过
+- ⏳ 实机验证待执行：
+  1. 进入鼠标模拟页，点「坐标拾取」→ 窗口隐藏
+  2. 切到**全屏游戏**，点击目标位置左键 → 日志 `picked (x, y)` → 窗口恢复，坐标回填
+  3. 普通权限下同样生效（无需管理员）
+  4. 拾取完成后正常进行鼠标点击模拟，验证 filter 已正确清除
+
+### 文档回写
+
+- [docs/DESIGN.md](./DESIGN.md) § 11.2 / § 11.3 已更新。
+
+### 偏差与遗留
+
+- **拾取期间持有 worker context 锁**：若用户进入拾取后一直不点击，线程会持续 `wait_with_timeout` 循环并持锁。此为既有设计约束（拾取无取消机制），与原 hook 方案行为对等，不在本次范围。
+- **全屏游戏内系统光标位置**：部分游戏锁定/隐藏系统光标，`GetCursorPos` 可能返回非预期位置。对有可见系统光标的游戏（窗口化全屏 / MOBA / RTS）可用；独占全屏且锁定光标的场景为已知限制。
+- **多显示器 / 高 DPI**：沿用第一版单显示器标准 DPI 约束，未改变。
+
+---
