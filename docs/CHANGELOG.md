@@ -1507,3 +1507,58 @@ pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
 - **P0-4（错误的设备选择）仍未修复**：`keyboard_worker.rs` 硬编码遍历 1-10 设备，应改为 1-20。留待后续修复。
 
 ---
+
+## 阶段 16.2：鼠标模拟设备扫描与空坐标处理修复
+
+**完成时间**：2026-06-10
+
+**触发原因**：实机测试发现鼠标模拟启动后蒙版正常出现但无实际点击效果，日志显示 `no mouse device found`。同时用户提出需求明确：列表为空或所有坐标为 null 时，启动热键应直接忽略，不进入模拟循环、不显示蒙版。
+
+**根因定位**：
+
+1. **设备扫描范围错误**（核心根因）— Interception SDK 设备编号约定（见 `interception.h:34-42`）：
+   - `INTERCEPTION_MAX_KEYBOARD = 10`（键盘 1-10）
+   - `INTERCEPTION_MAX_MOUSE = 10`（鼠标 11-20，宏 `INTERCEPTION_MOUSE(index) = MAX_KEYBOARD + index + 1`）
+   - `INTERCEPTION_MAX_DEVICE = 20`
+   
+   `mouse_worker.rs:93` 错误使用 `(1..=10).find(|d| interception::is_mouse(*d))`，这个范围全是键盘设备，必然找不到鼠标，导致每次点击事件被静默丢弃。
+
+2. **空坐标列表导致蒙版闪烁** — 原 `handle_start_mouse` 流程：
+   - 先把状态设为 `RunningMouse` → 蒙版出现
+   - 发送 `runtime_status_changed` 事件
+   - 启动线程后才检查 `valid_actions.is_empty()`
+   - 为空时再切回 `ReadyMouse` → 蒙版消失
+   
+   用户体验上蒙版闪一下，违反"列表全空忽略热键"的需求。
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/mouse_worker.rs](../src-tauri/src/mouse_worker.rs) | 改 | 鼠标设备扫描范围从 `1..=10` 改为 `1..=20`，匹配 Interception 设备编号约定（鼠标在 11-20） |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 | `handle_start_mouse` 重构：**前置坐标检查**——先取出有效坐标，全空则直接 `info!` 日志后返回，不切状态、不发事件、不启动线程；有有效坐标才设 `RunningMouse` 进入循环 |
+
+### 关键决策
+
+- **设备范围按 SDK 常量上限取整**：直接用 `1..=20` 覆盖全部设备槽位，无需额外引入常量。Interception 在非鼠标设备调用 `is_mouse` 返回 false，开销可忽略。
+- **空坐标前置拦截**：用户需求明确"忽略热键"，应在状态变更**之前**完成所有判断。原实现"先开后收"会让蒙版瞬时闪现，破坏交互一致性。
+- **设备范围单一来源**：键盘 worker 已实现 `1..=10`（位于键盘有效区间），鼠标 worker 改为 `1..=20`，二者各自正确。如未来需要严格分离，可引入常量 `KEYBOARD_DEVICES = 1..=10` 和 `MOUSE_DEVICES = 11..=20`，但当前修改成本最小。
+
+### 验证结果
+
+- ✅ `cargo build` 通过
+- ⏳ 实机验证待执行：
+  1. 鼠标列表全为 null → 按启动热键 → 日志 `mouse start ignored: no valid coords`，无蒙版、状态保持 `ReadyMouse`
+  2. 鼠标列表至少一项有坐标 → 按启动热键 → 蒙版出现，鼠标按列表顺序循环点击，间隔遵循各项 `intervalMs`
+  3. 按停止热键 → 立即停止循环，蒙版消失，状态回 `ReadyMouse`
+
+### 文档回写
+
+无（本次为代码层 bug 修复 + 行为细化，与 REQUIREMENTS 3.9 / DESIGN 10.2 已有约束一致）
+
+### 偏差与遗留
+
+- **键盘 worker 设备范围 `1..=10`**：当前正确（键盘在该区间），但语义上若键盘 worker 不慎扫到鼠标设备（不可能，因 `is_keyboard` 排他），逻辑仍稳健。无需修改。
+- **P2-2（E0 扩展键匹配错误）仍未修复**：留待后续。
+
+---

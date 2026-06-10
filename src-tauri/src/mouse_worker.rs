@@ -89,8 +89,9 @@ pub fn start_mouse_worker(
                 }
             };
 
-            // 扫描 1-10 找第一个鼠标设备
-            let mouse_device = (1..=10).find(|d| interception::is_mouse(*d));
+            // 扫描 1-20 找第一个鼠标设备
+            // Interception 设备编号: 键盘 1-10, 鼠标 11-20 (INTERCEPTION_MAX_DEVICE = 20)
+            let mouse_device = (1..=20).find(|d| interception::is_mouse(*d));
             let device = match mouse_device {
                 Some(d) => d,
                 None => {

@@ -296,11 +296,43 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
 }
 
 /// 鼠标模拟启动分支 — DESIGN 10.2 / 阶段 15
+///
+/// 列表为空或全部坐标为 null 时直接忽略热键：
+/// 不切状态、不发蒙版事件、不进入循环（用户需求 2026-06-10）。
 fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
-    let new_status = RuntimeStatus::RunningMouse;
-    info!("[hotkeys_interception] start triggered: Idle -> RunningMouse");
+    // 前置检查：先取出有效坐标，全空则直接返回
+    let valid_actions: Vec<crate::config::MouseAction> = {
+        let app_state = match state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("[hotkeys_interception] start_mouse: failed to lock state: {}", e);
+                return;
+            }
+        };
+        app_state
+            .config
+            .mouse_actions
+            .iter()
+            .filter(|a| a.x.is_some() && a.y.is_some())
+            .cloned()
+            .collect()
+    };
 
-    let (valid_actions, mouse_tx, stop_flag) = {
+    if valid_actions.is_empty() {
+        info!(
+            "[hotkeys_interception] mouse start ignored: no valid coords (list empty or all null)"
+        );
+        return;
+    }
+
+    // 有有效坐标，正式启动模拟
+    let new_status = RuntimeStatus::RunningMouse;
+    info!(
+        "[hotkeys_interception] start triggered: -> RunningMouse, {} valid actions",
+        valid_actions.len()
+    );
+
+    let (mouse_tx, stop_flag) = {
         let mut app_state = match state.lock() {
             Ok(s) => s,
             Err(e) => {
@@ -309,40 +341,27 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
             }
         };
         app_state.runtime_status = new_status.clone();
-        app_state.stop_flag.store(false, std::sync::atomic::Ordering::Relaxed);
-        // 跳过坐标为 null 的行（DESIGN 10.2 / REQUIREMENTS 3.9）
-        let valid = app_state
-            .config
-            .mouse_actions
-            .iter()
-            .filter(|a| a.x.is_some() && a.y.is_some())
-            .cloned()
-            .collect::<Vec<_>>();
-        (valid, app_state.mouse_tx.clone(), app_state.stop_flag.clone())
+        app_state
+            .stop_flag
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        (app_state.mouse_tx.clone(), app_state.stop_flag.clone())
     };
 
-    if let Err(e) = app.emit("runtime_status_changed", serde_json::json!({ "status": new_status })) {
-        error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
+    if let Err(e) = app.emit(
+        "runtime_status_changed",
+        serde_json::json!({ "status": new_status }),
+    ) {
+        error!(
+            "[hotkeys_interception] failed to emit runtime_status_changed: {}",
+            e
+        );
     }
 
-    let app_clone = app.clone();
-    let state_clone = state.clone();
     std::thread::spawn(move || {
         info!(
             "[hotkeys_interception] mouse simulation loop started, {} valid actions",
             valid_actions.len()
         );
-
-        if valid_actions.is_empty() {
-            // 全部坐标无效：日志明确，保持 ReadyMouse（不报错）— TASKS 阶段 15 验收
-            info!("[hotkeys_interception] all mouse actions have null coords, keeping ReadyMouse");
-            if let Ok(mut s) = state_clone.lock() { s.runtime_status = crate::state::RuntimeStatus::ReadyMouse; }
-            let _ = app_clone.emit(
-                "runtime_status_changed",
-                serde_json::json!({ "status": crate::state::RuntimeStatus::ReadyMouse }),
-            );
-            return;
-        }
 
         loop {
             for action in &valid_actions {
@@ -356,7 +375,9 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
                 }
                 let (x, y) = (action.x.unwrap(), action.y.unwrap());
                 check_stop!();
-                if let Err(e) = mouse_tx.send(crate::mouse_worker::MouseEvent::Click { x, y }) {
+                if let Err(e) =
+                    mouse_tx.send(crate::mouse_worker::MouseEvent::Click { x, y })
+                {
                     error!("[hotkeys_interception] failed to send MouseClick: {}", e);
                     return;
                 }
