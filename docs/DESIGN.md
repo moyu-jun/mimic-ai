@@ -545,13 +545,17 @@ fn run_mouse_simulation(
 - **命令**：`start_pick_mouse_position(row_id: String)`
 - **事件**：`mouse_position_picked { row_id, x, y }`
 
-### 11.2 实现方案（2026-06-10 第二次修订：复用热键监听 context）
+### 11.2 实现方案（✅ 已验证成功 — 2026-06-10 复用热键监听 context）
 
 > **方案演进**：
 > - **方案 A（已弃用）**：`WH_MOUSE_LL` 用户态 hook —— 被独占全屏游戏绕过，失效。
 > - **方案 B（已弃用）**：worker context 单独 `wait`/`receive` 鼠标 —— 同进程双 context 竞争同一设备事件分发，worker context 此前从未设过 filter，实际收不到鼠标事件，全屏游戏内仍失败。
-> - **方案 C（当前）**：复用「热键监听线程」的 listener context。该 context 已被证明能正常 `receive`（键盘热键工作正常即证明）。单 context 同时监听键盘 + 鼠标，是 Interception 标准用法，避免多 context 未定义行为。
+> - **方案 C（当前，✅ 实机验证通过，含全屏游戏）**：复用「热键监听线程」的 listener context。该 context 已被证明能正常 `receive`（键盘热键工作正常即证明）。单 context 同时监听键盘 + 鼠标，是 Interception 标准用法，避免多 context 未定义行为。
 
+**核心经验（务必遵守，避免重蹈方案 B 覆辙）**：
+> Interception 同进程内**多个 context 对同一设备的事件分发存在竞争**，一个仅用于 `send` 的 context 临时设 filter 去 `receive` 并不可靠。**监听类需求（receive）必须复用同一个已验证可 receive 的 listener context**，不要新建/借用 send-only 的 worker context 来收事件。listener 用于 receive、worker 用于 send，职责严格分离。
+
+**实现要点**：
 - listener 线程启动时**同时**设置两个 filter：键盘 `DOWN|UP`（热键）+ 鼠标 `LEFT_BUTTON_DOWN`（拾取）。
 - `start_pick_mouse_position` 命令：置 `PickingMouse`、记录 `pick_row_id`、隐藏窗口（**不再开独立线程**）。
 - listener 的 `wait()` 循环新增鼠标分支：收到鼠标事件 → `receive` → **透传所有 stroke**（保持目标窗口点击行为）→ 若含左键按下：
@@ -561,9 +565,11 @@ fn run_mouse_simulation(
 - 前端收到事件后回填对应行 X/Y 并持久化。
 - **锁安全**：listener 持 listener_ctx 锁、worker 持 worker_ctx 锁（两把不同的 Mutex），与 state 锁不构成循环等待。
 - **窗口恢复线程亲和性**：窗口在主线程创建，从 listener 线程直接 `show()`/`set_focus()` 受 Windows 前台锁定限制不可靠，必须 `run_on_main_thread` marshal 回主线程。
+- **坐标来源**：Interception 鼠标 stroke 的 x/y 是移动量而非屏幕坐标，故用 `GetCursorPos` 读系统光标位置作为拾取结果。
 - **第一版约束**（对应反馈 Q10/L13）：仅支持单显示器、标准 DPI。
 - **拾取期间无取消机制**（对应反馈 Q5）：用户只能通过左键点击完成拾取。
 - **异常处理**：`GetCursorPos` 失败时记 error 并仍调 `finish_pick` 恢复窗口，避免界面卡在 `PickingMouse`。
+- **已知限制**：独占全屏且锁定/隐藏系统光标的游戏（部分 FPS），`GetCursorPos` 可能读不到真实准星位置；对有可见系统光标的游戏（MOBA / RTS / 窗口化全屏）已验证可用。
 
 ### 11.3 历史方案（已弃用）
 
