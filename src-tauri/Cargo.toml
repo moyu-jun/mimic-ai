@@ -27,6 +27,10 @@ serde_json = "1"
 ini = { package = "rust-ini", version = "0.21" }
 interception = "0.1"
 
+# 阶段 18：提示音录制 — cpal 采集麦克风，hound 写 WAV
+cpal = "0.15"
+hound = "3.5"
+
 # 阶段 10：管理员权限检测 + 提权重启
 # 阶段 11：注册表驱动检测（Win32_System_Registry）
 # 阶段 14：鼠标坐标拾取（Win32_System_LibraryLoader 提供 GetModuleHandleW）

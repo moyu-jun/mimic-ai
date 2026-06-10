@@ -15,6 +15,7 @@ mod keyboard_worker;
 mod mouse_picker;
 mod mouse_worker;
 mod sound;
+mod sound_recorder;
 mod state;
 
 use config::AppConfig;
@@ -51,7 +52,8 @@ fn save_config(config: AppConfig, state: tauri::State<SharedState>) -> Result<()
         match app_state.runtime_status {
             RuntimeStatus::RunningKeyboard
             | RuntimeStatus::RunningMouse
-            | RuntimeStatus::PickingMouse => {
+            | RuntimeStatus::PickingMouse
+            | RuntimeStatus::Recording => {
                 return Err("busy: simulation running".to_string());
             }
             _ => {}
@@ -123,7 +125,8 @@ fn install_interception_driver(state: tauri::State<SharedState>) -> Result<(), S
         match app_state.runtime_status {
             RuntimeStatus::RunningKeyboard
             | RuntimeStatus::RunningMouse
-            | RuntimeStatus::PickingMouse => {
+            | RuntimeStatus::PickingMouse
+            | RuntimeStatus::Recording => {
                 return Err("busy: simulation running".to_string());
             }
             _ => {}
@@ -173,7 +176,8 @@ fn set_current_page(
         match app_state.runtime_status {
             RuntimeStatus::RunningKeyboard
             | RuntimeStatus::RunningMouse
-            | RuntimeStatus::PickingMouse => {
+            | RuntimeStatus::PickingMouse
+            | RuntimeStatus::Recording => {
                 return Err("busy: simulation running".to_string());
             }
             _ => {}
@@ -240,7 +244,8 @@ fn update_hotkeys(
         match app_state.runtime_status {
             RuntimeStatus::RunningKeyboard
             | RuntimeStatus::RunningMouse
-            | RuntimeStatus::PickingMouse => {
+            | RuntimeStatus::PickingMouse
+            | RuntimeStatus::Recording => {
                 return Err("busy: simulation running".to_string());
             }
             _ => {}
@@ -314,7 +319,8 @@ fn start_pick_mouse_position(
         match app_state.runtime_status {
             RuntimeStatus::RunningKeyboard
             | RuntimeStatus::RunningMouse
-            | RuntimeStatus::PickingMouse => {
+            | RuntimeStatus::PickingMouse
+            | RuntimeStatus::Recording => {
                 return Err("busy: simulation running".to_string());
             }
             _ => {}
@@ -322,6 +328,84 @@ fn start_pick_mouse_position(
     }
 
     mouse_picker::start_pick_mouse_position(app, state.inner().clone(), row_id)
+}
+
+/// 开始录制提示音 — DESIGN 20.5 / 阶段 18
+///
+/// target: "start" -> 按键开启.wav, "stop" -> 按键关闭.wav。
+/// 运行态守卫：Running* / PickingMouse / Recording 时拒绝。
+#[tauri::command]
+fn start_recording(
+    target: String,
+    state: tauri::State<SharedState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let handle = {
+        let app_state = state
+            .inner()
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard
+            | RuntimeStatus::RunningMouse
+            | RuntimeStatus::PickingMouse
+            | RuntimeStatus::Recording => {
+                return Err("busy: simulation running".to_string());
+            }
+            _ => {}
+        }
+        app_state.recording.clone()
+    };
+
+    sound_recorder::start_recording(app, state.inner().clone(), handle, target)
+}
+
+/// 停止录制并保存 — 阶段 18
+#[tauri::command]
+fn stop_recording(state: tauri::State<SharedState>) -> Result<(), String> {
+    let handle = {
+        let app_state = state
+            .inner()
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        app_state.recording.clone()
+    };
+    sound_recorder::stop_recording(&handle)
+}
+
+/// 取消录制（不写文件）— 阶段 18
+#[tauri::command]
+fn cancel_recording(state: tauri::State<SharedState>) -> Result<(), String> {
+    let handle = {
+        let app_state = state
+            .inner()
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        app_state.recording.clone()
+    };
+    sound_recorder::cancel_recording(&handle)
+}
+
+/// 试听提示音 — 阶段 18
+///
+/// target: "start" -> 按键开启.wav, "stop" -> 按键关闭.wav。
+/// 复用现有 sound 模块，文件缺失时仅记录日志，不报错。
+#[tauri::command]
+fn preview_sound(target: String) -> Result<(), String> {
+    match target.as_str() {
+        "start" => sound::play_start(),
+        "stop" => sound::play_stop(),
+        _ => return Err("invalid target".to_string()),
+    }
+    Ok(())
+}
+
+/// 查询提示音文件是否存在 — 阶段 18
+///
+/// 返回 [开启音存在, 关闭音存在]，供设置页展示状态。
+#[tauri::command]
+fn get_sound_status() -> (bool, bool) {
+    sound::sound_files_exist()
 }
 
 /// 以管理员身份重启自身 — DESIGN 14.1 / 阶段 10
@@ -469,6 +553,7 @@ pub fn run() {
                 interception_worker: worker_ctx.clone(),
                 action_tx: action_tx.clone(),
                 mouse_tx: mouse_tx.clone(),
+                recording: sound_recorder::new_handle(),
             }));
 
             if matches!(&driver_status, state::DriverStatus::Ready) {
@@ -526,6 +611,11 @@ pub fn run() {
             stop_simulation,
             get_runtime_status,
             start_pick_mouse_position,
+            start_recording,
+            stop_recording,
+            cancel_recording,
+            preview_sound,
+            get_sound_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

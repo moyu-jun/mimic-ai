@@ -456,6 +456,26 @@
 
 ---
 
+### 阶段 18：提示音录制
+
+**目标**：设置页录制人声生成提示音 WAV，覆盖 exe 同级文件，录制中显示真实波形。
+
+任务：
+
+1. Cargo 增加 `cpal` 0.15 + `hound` 3.5 依赖。
+2. 新建 [src-tauri/src/sound_recorder.rs](src-tauri/src/sound_recorder.rs)：cpal 采集 → i16/mono 缓冲 → hound 写 `*.wav.tmp` → rename；幅度走 `recording_amplitude` 事件（DESIGN 20）。
+3. `lib.rs` 接入 `start_recording` / `stop_recording` / `cancel_recording` 三命令；`state.rs` 加 `RuntimeStatus::Recording` 并并入运行态守卫拒绝集。
+4. 前端：`SettingsPage.vue` 新增「提示音」区块（状态行 + 试听 + 录制），canvas 实时波形；`appStore` / `types/config.ts` 扩展 `Recording` 状态。
+
+**可运行验收**：
+
+- [ ] 实机：点录制 → 说话 → 完成/5s 自动停 → 文件覆盖、热键触发能播新音（⏳ 待实机）。
+- [ ] 实机：录制中波形随说话起伏；取消不写文件（⏳ 待实机）。
+- [ ] 实机：无麦克风 / 写盘失败时提示且不影响其它功能（⏳ 待实机）。
+- [ ] `cargo check` / `cargo clippy` / `npm run build` 通过（静态验收）。
+
+---
+
 ## 待确认事项跟踪
 
 | # | 事项 | 状态 | 触发动作 |

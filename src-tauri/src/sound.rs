@@ -73,3 +73,30 @@ pub fn play_start() {}
 
 #[cfg(not(windows))]
 pub fn play_stop() {}
+
+/// 停止当前所有正在播放的提示音，释放可能持有的文件句柄 — 阶段 18 录制覆盖前调用。
+#[cfg(windows)]
+pub fn purge_playing() {
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_PURGE};
+    // 第一参数为 NULL + SND_PURGE：停止与本进程关联的所有播放
+    unsafe {
+        PlaySoundW(std::ptr::null(), std::ptr::null_mut(), SND_PURGE);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn purge_playing() {}
+
+/// 返回 exe 同级提示音文件是否存在 — 阶段 18 设置页状态展示用。
+pub fn sound_files_exist() -> (bool, bool) {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    match dir {
+        Some(d) => (
+            d.join("按键开启.wav").exists(),
+            d.join("按键关闭.wav").exists(),
+        ),
+        None => (false, false),
+    }
+}

@@ -1023,6 +1023,84 @@ pub fn default_config() -> AppConfig {
 - 被忽略的热键（运行中再按启动、待机中按停止）不会进入上述任一 handler，故不播放，无需额外判断。
 - 启动键 == 停止键的 toggle 场景：由状态机按当前 `runtime_status` 路由到 START / STOP 分支，分别播放对应声音，逻辑天然正确。
 
+## 20. 提示音录制
+
+> 对应需求 3.14。设置页录制人声 → 写 WAV → 覆盖 exe 同级提示音文件。
+
+### 20.1 技术选型
+
+- **采集**：`cpal` 0.15（纯 Rust，跨平台音频输入）。
+- **编码**：`hound` 3.5（纯 Rust WAV 编解码）。
+- 不引入 C 依赖，与现有 `PlaySoundW` 播放方案解耦。
+
+### 20.2 数据流
+
+```text
+[Mic] → cpal input stream（采集线程）
+         ├─ i16 PCM → Mutex<Vec<i16>>（累积到内存缓冲）
+         └─ 窗口峰值 → Tauri event "recording_amplitude" { level: 0.0~1.0 }（~30 fps）
+                       ↓ 前端 canvas 环形缓冲滚动重绘
+[完成/超时] → 锁缓冲 → hound 写 *.wav.tmp → fs::rename 原子替换
+```
+
+- 录音 PCM 累积到内存，停止时一次性落盘（5s×44100×2B ≈ 440KB，瞬间完成）。
+- 波形数据独立走事件通道，不读主缓冲，避免锁争用。
+
+### 20.3 录制规格
+
+| 参数 | 值 | 说明 |
+|------|----|------|
+| 采样率 | 44100 Hz | 设备不支持时退回 `default_input_config()` 原生采样率 |
+| 位深 | 16-bit PCM | `PlaySoundW` 必支持，文件最小 |
+| 声道 | mono | 提示音无需立体声 |
+| 最大时长 | 5 秒 | 到上限自动停止并保存 |
+| 设备 | 系统默认输入 | 不做选择 UI |
+
+> cpal 采集格式可能是 f32/i16/u16，统一在回调内转换为 i16；多声道设备只取第 0 声道降为 mono。
+
+### 20.4 文件覆盖策略
+
+- 目标：exe 同级 `按键开启.wav`（target=`start`）/ `按键关闭.wav`（target=`stop`）。
+- 写入前调 `PlaySoundW(NULL, NULL, SND_PURGE)` 停止所有正在播放的提示音，释放可能持有的文件句柄。
+- 写 `<name>.wav.tmp` → `fs::rename` 原子替换；失败时旧文件不动，不做额外备份。
+
+### 20.5 后端接口
+
+模块 [src-tauri/src/sound_recorder.rs](../src-tauri/src/sound_recorder.rs)：
+
+```rust
+#[tauri::command] fn start_recording(target: String) -> Result<(), String>
+#[tauri::command] fn stop_recording() -> Result<u32, String>   // 返回时长 ms
+#[tauri::command] fn cancel_recording() -> Result<(), String>
+```
+
+- `target`: `"start"` | `"stop"`。
+- 事件：`recording_amplitude { level }`、`recording_finished { path, durationMs }`、`recording_error { error }`。
+- 采集流句柄 + 缓冲存于独立的 `RecordingState`（cpal `Stream` 非 Send，单独放在专用结构，不进 `AppState` 主锁；用一个独立 `Mutex` 守护）。
+
+### 20.6 状态机与守卫
+
+- 新增 `RuntimeStatus::Recording` 临时态，与 `PickingMouse` 同级。
+- 现有运行态守卫命令（`save_config` / `update_hotkeys` / `set_current_page` / `start_pick_mouse_position` / `install_interception_driver`）的拒绝集加入 `Recording`。
+- 反向：`start_recording` 在 `Running*` / `PickingMouse` / `Recording` 时拒绝。
+- 录制仅设置页可用：前端在非设置页不渲染录制区块（后端守卫为兜底）。
+
+### 20.7 前端 UI（设置页「提示音」区块）
+
+- 每项一行：状态点（● 已录制 / ○ 未录制 / 🔴 录制中）+ 状态文字 + 试听按钮 + 录制按钮。
+- 录制中该行展开：倒计时 `0:02 / 0:05` + canvas 波形 + [取消] [完成]。
+- canvas：高度约 40px，环形缓冲保留最近 ~150 个幅度采样，`requestAnimationFrame` 重绘。
+- 互斥：录制中禁用其它录制 / 试听按钮；模拟运行中整个区块禁用。
+
+### 20.8 错误处理（均不影响主功能）
+
+| 场景 | 处理 |
+|------|------|
+| 无麦克风 | 录制按钮 disabled + 提示「未检测到麦克风」 |
+| 设备占用 / 权限拒绝 | `recording_error` 提示，状态回未录制 |
+| 写盘失败 | 提示，旧文件不动（tmp + rename） |
+| 录制中关应用 | cpal 流 drop，缓冲丢弃，无副作用 |
+
 ## 19. 方案变更记录
 
 > 本节记录重大技术方案调整，与需求变更记录（REQUIREMENTS.md）交叉引用。

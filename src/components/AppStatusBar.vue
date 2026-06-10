@@ -20,6 +20,7 @@ const STATUS_MAP: Record<RuntimeStatus, StatusMeta> = {
   RunningKeyboard: { colorVar: 'var(--success)', label: '按键模拟运行中' },
   RunningMouse: { colorVar: 'var(--success)', label: '鼠标模拟运行中' },
   PickingMouse: { colorVar: 'var(--warning)', label: '正在拾取鼠标坐标' },
+  Recording: { colorVar: 'var(--warning)', label: '正在录制提示音' },
   Error: { colorVar: 'var(--danger)', label: '错误' },
 }
 

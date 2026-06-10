@@ -36,6 +36,8 @@ pub enum RuntimeStatus {
     RunningMouse,
     /// 正在拾取鼠标坐标
     PickingMouse,
+    /// 正在录制提示音（阶段 18）
+    Recording,
     /// 驱动或配置错误
     Error,
 }
@@ -82,6 +84,8 @@ pub struct AppState {
     pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
     /// 鼠标模拟事件发送器（阶段 15）— DESIGN 10.2
     pub mouse_tx: SyncSender<crate::mouse_worker::MouseEvent>,
+    /// 提示音录制句柄（阶段 18）— Some 表示录制进行中，由录制线程管理
+    pub recording: crate::sound_recorder::RecordingHandle,
 }
 
 /// 共享状态类型（Arc + Mutex 包装）

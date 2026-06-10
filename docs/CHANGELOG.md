@@ -1734,3 +1734,49 @@ Interception 同进程多 context 对同一设备的事件分发存在竞争，w
 无
 
 ---
+
+## 阶段 18：提示音录制
+
+**完成时间**：2026-06-10
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | 新增 `cpal` 0.15 + `hound` 3.5 |
+| [src-tauri/src/sound_recorder.rs](../src-tauri/src/sound_recorder.rs) | 新建 ~360 行 | cpal 采集 → mono/i16 缓冲 → hound 写 `*.wav.tmp` + rename；专用录制线程持有 `!Send` 的 Stream，命令经 channel 发停止/取消信号；幅度走 `recording_amplitude` 事件 |
+| [src-tauri/src/sound.rs](../src-tauri/src/sound.rs) | 改 | 新增 `purge_playing()`（SND_PURGE 释放文件句柄）、`sound_files_exist()` |
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 改 | 新增 `RuntimeStatus::Recording`；`AppState.recording: RecordingHandle` |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 新增 4 命令 `start/stop/cancel_recording` `preview_sound` `get_sound_status`；5 处运行态守卫并入 `Recording` |
+| [src/types/config.ts](../src/types/config.ts) | 改 | `RuntimeStatus` 增 `Recording` |
+| [src/components/AppStatusBar.vue](../src/components/AppStatusBar.vue) | 改 | 状态映射增「正在录制提示音」 |
+| [src/pages/SettingsPage.vue](../src/pages/SettingsPage.vue) | 改 | 新增「提示音」区块：状态行 + 试听 + 录制；canvas 实时波形（环形缓冲 + rAF）；录制中倒计时 + 取消/完成 |
+
+### 关键决策
+
+- **cpal Stream 是 `!Send`**：不放进 `AppState` 主锁，改由专用录制线程创建并持有，命令通过 `channel<RecCtrl>` 发停止/取消信号；音频缓冲与峰值经 `Arc<Mutex<RecBuf>>` 共享。
+- **波形真实数据**：回调内按帧取第 0 声道降 mono、算窗口峰值；录制线程按 ~30fps 经事件推送，前端 canvas 环形缓冲滚动重绘 —— 不在音频回调里直接 emit。
+- **覆盖安全**：写前 `PlaySoundW(NULL, SND_PURGE)` 释放正在播放文件的句柄；`*.wav.tmp` + `fs::rename` 原子替换，失败不破坏旧文件。
+- **收尾统一走事件**：`stop/cancel` 命令仅发信号，真正的状态恢复 / 文件写入 / `recording_finished` 由录制线程完成，前端监听事件刷新，避免命令层阻塞等待 join。
+- **守卫双向**：`Recording` 并入既有运行态守卫拒绝集；`start_recording` 在 Running*/Picking/Recording 时拒绝；离开设置页自动 `cancel_recording`。
+
+### 验证结果
+
+- `cargo check` / `cargo clippy` 通过，无 warning。
+- `npm run build`（vue-tsc + vite）通过，51 模块，CSS 19.91 kB / JS 104.29 kB。
+- `cargo build --release` 通过（cpal Windows WASAPI 后端链接成功）。
+- 实机验收待用户：录音覆盖、波形起伏、取消不写、无麦克风提示。
+
+### 文档回写
+
+- [REQUIREMENTS.md](./REQUIREMENTS.md)：新增 3.14「提示音录制」。
+- [DESIGN.md](./DESIGN.md)：新增 20 节（技术选型 / 数据流 / 规格 / 覆盖策略 / 接口 / 守卫 / UI / 错误处理）。
+- [TASKS.md](./TASKS.md)：新增阶段 18，静态验收通过、实机待验。
+
+### 偏差与遗留
+
+- **录制设备固定为系统默认输入**，不提供设备选择 UI（按既定方案）。
+- **覆盖前不备份**旧提示音文件（按既定方案）。
+- 实机验证项：真实麦克风采集、5s 自停、波形观感、各错误路径提示，待用户在 Windows 实机确认。
+
+---

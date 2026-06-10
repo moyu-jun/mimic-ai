@@ -17,6 +17,7 @@ export type RuntimeStatus =
   | 'RunningKeyboard'
   | 'RunningMouse'
   | 'PickingMouse'
+  | 'Recording'
   | 'Error'
 
 /** Interception 驱动状态（DESIGN 12.2 / 阶段 11） */
