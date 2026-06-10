@@ -72,15 +72,42 @@ fn emit_status(app: &AppHandle, status: RuntimeStatus) {
 }
 
 /// 恢复窗口 + 状态回 ReadyMouse（拾取成功路径调用）。
+///
+/// 窗口显示/聚焦操作 marshal 到主线程执行：Windows 窗口有线程亲和性，
+/// 从拾取后台线程直接调用 show()/set_focus() 在隐藏后不可靠（前台锁定限制）。
 fn restore_window_and_ready(app: &AppHandle, state: &SharedState) {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    restore_window_on_main(app);
     if let Ok(mut app_state) = state.lock() {
         app_state.runtime_status = RuntimeStatus::ReadyMouse;
     }
     emit_status(app, RuntimeStatus::ReadyMouse);
+}
+
+/// 在主线程恢复并聚焦主窗口（show + unminimize + set_focus）。
+fn restore_window_on_main(app: &AppHandle) {
+    let app_clone = app.clone();
+    let dispatched = app.run_on_main_thread(move || {
+        match app_clone.get_webview_window("main") {
+            Some(win) => {
+                if let Err(e) = win.unminimize() {
+                    log::warn!("[mouse_picker] unminimize failed: {}", e);
+                }
+                if let Err(e) = win.show() {
+                    log::error!("[mouse_picker] window show failed: {}", e);
+                }
+                if let Err(e) = win.set_focus() {
+                    log::warn!("[mouse_picker] set_focus failed: {}", e);
+                }
+                log::info!("[mouse_picker] window restored on main thread");
+            }
+            None => {
+                log::error!("[mouse_picker] main window not found during restore");
+            }
+        }
+    });
+    if let Err(e) = dispatched {
+        log::error!("[mouse_picker] run_on_main_thread dispatch failed: {}", e);
+    }
 }
 
 /// 恢复窗口 + 状态回 ReadyMouse + 发 simulation_error（异常路径调用）。
