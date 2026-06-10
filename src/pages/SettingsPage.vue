@@ -125,13 +125,32 @@ let recMsgTimer: number | null = null
 const WAVE_LEN = 150
 const waveBuf = new Array<number>(WAVE_LEN).fill(0)
 let waveWritePos = 0
-const waveCanvas = ref<HTMLCanvasElement | null>(null)
+const waveCanvasStart = ref<HTMLCanvasElement | null>(null)
+const waveCanvasStop = ref<HTMLCanvasElement | null>(null)
 let rafId: number | null = null
 let recTimer: number | null = null
 
 let unlistenAmp: UnlistenFn | null = null
 let unlistenFinished: UnlistenFn | null = null
 let unlistenError: UnlistenFn | null = null
+
+// ===== 剪裁态（阶段 18.1）=====
+const trimmingTarget = ref<SoundTarget | null>(null)
+const trimmingSamples = ref<Int16Array | null>(null)
+const trimmingSampleRate = ref(44100)
+const trimmingDurationMs = ref(0)
+const trimStart = ref(0)
+const trimEnd = ref(0)
+const draggingMarker = ref<'start' | 'end' | null>(null)
+const trimCanvasStart = ref<HTMLCanvasElement | null>(null)
+const trimCanvasStop = ref<HTMLCanvasElement | null>(null)
+
+const trimRangeLabel = computed(() => {
+  const s = (trimStart.value / 1000).toFixed(1)
+  const e = (trimEnd.value / 1000).toFixed(1)
+  const dur = ((trimEnd.value - trimStart.value) / 1000).toFixed(1)
+  return `已选 ${s}s ~ ${e}s（${dur}秒）`
+})
 
 const recElapsedLabel = computed(() => {
   const s = Math.min(Math.floor(recElapsedMs.value / 1000), MAX_REC_SECS)
@@ -240,10 +259,13 @@ function startWaveLoop(): void {
 }
 
 function drawWave(): void {
-  const canvas = waveCanvas.value
+  const canvas = recordingTarget.value === 'start' ? waveCanvasStart.value : waveCanvasStop.value
   if (!canvas) return
   const ctx = canvas.getContext('2d')
   if (!ctx) return
+  // 同步 canvas 分辨率到 CSS 尺寸（避免模糊 + 响应容器宽度）
+  const cw = canvas.clientWidth
+  if (canvas.width !== cw) canvas.width = cw
   const w = canvas.width
   const h = canvas.height
   ctx.clearRect(0, 0, w, h)
@@ -259,6 +281,126 @@ function drawWave(): void {
   }
 }
 
+// ===== 剪裁逻辑函数（阶段 18.1）=====
+function enterTrimmingMode(target: SoundTarget, base64: string, sr: number, dur: number) {
+  // base64 → Int16Array
+  const bin = atob(base64)
+  const buf = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+  const samples = new Int16Array(buf.buffer)
+
+  trimmingTarget.value = target
+  trimmingSamples.value = samples
+  trimmingSampleRate.value = sr
+  trimmingDurationMs.value = dur
+  trimStart.value = 0
+  trimEnd.value = dur
+  appStore.runtimeStatus = 'Idle'
+
+  nextTick(() => drawTrimWave())
+}
+
+function drawTrimWave() {
+  const canvas = trimmingTarget.value === 'start' ? trimCanvasStart.value : trimCanvasStop.value
+  if (!canvas || !trimmingSamples.value) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const cw = canvas.clientWidth
+  if (canvas.width !== cw) canvas.width = cw
+  const w = canvas.width, h = canvas.height
+  ctx.clearRect(0, 0, w, h)
+
+  // 绘制全程波形（降采样）
+  const samples = trimmingSamples.value
+  ctx.strokeStyle = getComputedStyle(canvas).getPropertyValue('--accent').trim() || '#FE7733'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  for (let x = 0; x < w; x++) {
+    const i = Math.floor((x / w) * samples.length)
+    const val = samples[i] / 32768
+    const y = h / 2 - val * (h / 2 - 2)
+    x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+  }
+  ctx.stroke()
+
+  // 绘制选区遮罩（start 左侧 + end 右侧半透明灰）
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'
+  const startX = (trimStart.value / trimmingDurationMs.value) * w
+  const endX = (trimEnd.value / trimmingDurationMs.value) * w
+  ctx.fillRect(0, 0, startX, h)
+  ctx.fillRect(endX, 0, w - endX, h)
+}
+
+async function onPreviewTrimmed() {
+  if (!trimmingSamples.value) return
+  const ctx = new AudioContext()
+  const buf = ctx.createBuffer(1, trimmingSamples.value.length, trimmingSampleRate.value)
+  const ch = buf.getChannelData(0)
+  for (let i = 0; i < trimmingSamples.value.length; i++) {
+    ch[i] = trimmingSamples.value[i] / 32768
+  }
+  const src = ctx.createBufferSource()
+  src.buffer = buf
+  src.connect(ctx.destination)
+  const startS = trimStart.value / 1000
+  const durS = (trimEnd.value - trimStart.value) / 1000
+  src.start(0, startS, durS)
+}
+
+async function onConfirmTrim() {
+  if (trimmingTarget.value === null) return
+  try {
+    await invoke('save_trimmed_audio', {
+      target: trimmingTarget.value,
+      startMs: trimStart.value,
+      endMs: trimEnd.value,
+    })
+    exitTrimmingMode()
+    await refreshSoundStatus()
+    showRecMessage('已保存', false)
+  } catch (err) {
+    showRecMessage(`保存失败: ${err}`, true)
+  }
+}
+
+function onCancelTrim() {
+  exitTrimmingMode()
+}
+
+function exitTrimmingMode() {
+  trimmingTarget.value = null
+  trimmingSamples.value = null
+  appStore.runtimeStatus = 'Idle'
+}
+
+function onMarkerMouseDown(marker: 'start' | 'end', e: MouseEvent) {
+  e.preventDefault()
+  draggingMarker.value = marker
+
+  const onMove = (me: MouseEvent) => {
+    if (!draggingMarker.value) return
+    const canvas = trimmingTarget.value === 'start' ? trimCanvasStart.value : trimCanvasStop.value
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const x = me.clientX - rect.left
+    const ratio = x / rect.width
+    const ms = Math.max(0, Math.min(trimmingDurationMs.value, ratio * trimmingDurationMs.value))
+    if (draggingMarker.value === 'start') {
+      trimStart.value = Math.min(ms, trimEnd.value - 100)
+    } else {
+      trimEnd.value = Math.max(ms, trimStart.value + 100)
+    }
+    drawTrimWave()
+  }
+  const onUp = () => {
+    draggingMarker.value = null
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
 onMounted(async () => {
   await refreshSoundStatus()
 
@@ -267,12 +409,27 @@ onMounted(async () => {
     waveWritePos = (waveWritePos + 1) % WAVE_LEN
   })
 
-  unlistenFinished = await listen<{ cancelled: boolean }>('recording_finished', (e) => {
+  unlistenFinished = await listen<{
+    cancelled: boolean
+    samplesBase64?: string
+    sampleRate?: number
+    durationMs: number
+  }>('recording_finished', (e) => {
     resetRecordingState()
-    appStore.runtimeStatus = 'Idle'
-    if (!e.payload.cancelled) {
-      void refreshSoundStatus()
-      showRecMessage('已保存', false)
+    if (e.payload.cancelled) {
+      appStore.runtimeStatus = 'Idle'
+      return
+    }
+    // 录制完成，进入剪裁态
+    if (e.payload.samplesBase64 && recordingTarget.value) {
+      enterTrimmingMode(
+        recordingTarget.value,
+        e.payload.samplesBase64,
+        e.payload.sampleRate || 44100,
+        e.payload.durationMs
+      )
+    } else {
+      appStore.runtimeStatus = 'Idle'
     }
   })
 
@@ -343,16 +500,39 @@ onMounted(() => {
             <template v-else-if="startExists">已录制</template>
             <template v-else>未录制</template>
           </span>
-          <span class="sound-actions" v-if="recordingTarget !== 'start'">
-            <button type="button" class="mini-btn" :disabled="!startExists || recordingTarget !== null" @click="onPreview('start')">试听</button>
-            <button type="button" class="mini-btn rec" :disabled="recordingTarget !== null || micUnavailable" @click="onStartRecord('start')">录制</button>
+          <span class="sound-actions" v-if="recordingTarget !== 'start' && trimmingTarget !== 'start'">
+            <button type="button" class="mini-btn" :disabled="!startExists || recordingTarget !== null || trimmingTarget !== null" @click="onPreview('start')">试听</button>
+            <button type="button" class="mini-btn rec" :disabled="recordingTarget !== null || trimmingTarget !== null || micUnavailable" @click="onStartRecord('start')">录制</button>
           </span>
         </div>
+        <!-- 录制中 -->
         <div v-if="recordingTarget === 'start'" class="rec-panel">
-          <canvas ref="waveCanvas" class="wave" width="320" height="40"></canvas>
+          <canvas ref="waveCanvasStart" class="wave" height="40"></canvas>
           <div class="rec-buttons">
             <button type="button" class="mini-btn" @click="onCancelRecord">取消</button>
             <button type="button" class="mini-btn primary" @click="onStopRecord">完成</button>
+          </div>
+        </div>
+        <!-- 剪裁中 -->
+        <div v-if="trimmingTarget === 'start'" class="trim-panel">
+          <div class="trim-wave-wrap">
+            <canvas ref="trimCanvasStart" class="wave-trim" height="60"></canvas>
+            <div class="trim-marker start"
+                 :style="{left: (trimStart / trimmingDurationMs * 100) + '%'}"
+                 @mousedown="onMarkerMouseDown('start', $event)">
+              <div class="marker-handle"></div>
+            </div>
+            <div class="trim-marker end"
+                 :style="{left: (trimEnd / trimmingDurationMs * 100) + '%'}"
+                 @mousedown="onMarkerMouseDown('end', $event)">
+              <div class="marker-handle"></div>
+            </div>
+          </div>
+          <span class="trim-info">{{ trimRangeLabel }}</span>
+          <div class="trim-buttons">
+            <button type="button" class="mini-btn" @click="onPreviewTrimmed">试听</button>
+            <button type="button" class="mini-btn primary" @click="onConfirmTrim">确认</button>
+            <button type="button" class="mini-btn" @click="onCancelTrim">取消</button>
           </div>
         </div>
       </div>
@@ -367,16 +547,39 @@ onMounted(() => {
             <template v-else-if="stopExists">已录制</template>
             <template v-else>未录制</template>
           </span>
-          <span class="sound-actions" v-if="recordingTarget !== 'stop'">
-            <button type="button" class="mini-btn" :disabled="!stopExists || recordingTarget !== null" @click="onPreview('stop')">试听</button>
-            <button type="button" class="mini-btn rec" :disabled="recordingTarget !== null || micUnavailable" @click="onStartRecord('stop')">录制</button>
+          <span class="sound-actions" v-if="recordingTarget !== 'stop' && trimmingTarget !== 'stop'">
+            <button type="button" class="mini-btn" :disabled="!stopExists || recordingTarget !== null || trimmingTarget !== null" @click="onPreview('stop')">试听</button>
+            <button type="button" class="mini-btn rec" :disabled="recordingTarget !== null || trimmingTarget !== null || micUnavailable" @click="onStartRecord('stop')">录制</button>
           </span>
         </div>
+        <!-- 录制中 -->
         <div v-if="recordingTarget === 'stop'" class="rec-panel">
-          <canvas ref="waveCanvas" class="wave" width="320" height="40"></canvas>
+          <canvas ref="waveCanvasStop" class="wave" height="40"></canvas>
           <div class="rec-buttons">
             <button type="button" class="mini-btn" @click="onCancelRecord">取消</button>
             <button type="button" class="mini-btn primary" @click="onStopRecord">完成</button>
+          </div>
+        </div>
+        <!-- 剪裁中 -->
+        <div v-if="trimmingTarget === 'stop'" class="trim-panel">
+          <div class="trim-wave-wrap">
+            <canvas ref="trimCanvasStop" class="wave-trim" height="60"></canvas>
+            <div class="trim-marker start"
+                 :style="{left: (trimStart / trimmingDurationMs * 100) + '%'}"
+                 @mousedown="onMarkerMouseDown('start', $event)">
+              <div class="marker-handle"></div>
+            </div>
+            <div class="trim-marker end"
+                 :style="{left: (trimEnd / trimmingDurationMs * 100) + '%'}"
+                 @mousedown="onMarkerMouseDown('end', $event)">
+              <div class="marker-handle"></div>
+            </div>
+          </div>
+          <span class="trim-info">{{ trimRangeLabel }}</span>
+          <div class="trim-buttons">
+            <button type="button" class="mini-btn" @click="onPreviewTrimmed">试听</button>
+            <button type="button" class="mini-btn primary" @click="onConfirmTrim">确认</button>
+            <button type="button" class="mini-btn" @click="onCancelTrim">取消</button>
           </div>
         </div>
       </div>
@@ -405,8 +608,27 @@ onMounted(() => {
   height: 100%;
   padding: 16px 18px;
   gap: 14px;
+  overflow-x: hidden;
   overflow-y: auto;
   scrollbar-gutter: stable;
+}
+
+/* 滚动条样式 — 同 KeyboardPage / MousePage */
+.settings-page::-webkit-scrollbar {
+  width: 8px;
+}
+
+.settings-page::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-page::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+.settings-page::-webkit-scrollbar-thumb:hover {
+  background: var(--text-disabled);
 }
 
 .page-header {
@@ -629,10 +851,13 @@ onMounted(() => {
   align-items: center;
   gap: 10px;
   padding-left: 18px;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .wave {
   flex: 1;
+  min-width: 0;
   height: 40px;
   background: var(--bg-primary);
   border: 1px solid var(--border-subtle);
@@ -647,5 +872,59 @@ onMounted(() => {
 
 .sound-msg {
   align-self: flex-end;
+}
+
+/* ===== 剪裁样式（阶段 18.1）===== */
+.trim-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 18px;
+}
+
+.trim-wave-wrap {
+  position: relative;
+  width: 100%;
+}
+
+.wave-trim {
+  width: 100%;
+  height: 60px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  display: block;
+}
+
+.trim-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  cursor: ew-resize;
+}
+
+.trim-marker .marker-handle {
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--color-paper-white);
+}
+
+.trim-info {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding-left: 0;
+}
+
+.trim-buttons {
+  display: flex;
+  gap: 8px;
 }
 </style>

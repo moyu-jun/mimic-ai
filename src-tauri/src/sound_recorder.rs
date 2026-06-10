@@ -171,8 +171,8 @@ fn run_recording_thread(
     channels: usize,
     sample_rate: u32,
     target: String,
-    file_name: &str,
-    exe_dir: Option<std::path::PathBuf>,
+    _file_name: &str,
+    _exe_dir: Option<std::path::PathBuf>,
 ) {
     // 构建输入流（回调内降为 mono i16 累积 + 记录峰值）
     let stream = match build_input_stream(&device, &config, sample_format, channels, buf.clone()) {
@@ -243,7 +243,7 @@ fn run_recording_thread(
     finish_idle(&app, &state, &handle);
 
     if cancelled {
-        info!("[recorder] cancelled, no file written");
+        info!("[recorder] cancelled, no buffer retained");
         let _ = app.emit(
             "recording_finished",
             serde_json::json!({ "target": target, "cancelled": true, "durationMs": duration_ms }),
@@ -251,43 +251,111 @@ fn run_recording_thread(
         return;
     }
 
-    // 写文件（tmp + rename），写前停止正在播放的提示音释放句柄
-    crate::sound::purge_playing();
-    let dir = match exe_dir {
-        Some(d) => d,
-        None => {
-            error!("[recorder] no exe dir");
-            let _ = app.emit(
-                "recording_error",
-                serde_json::json!({ "error": "no_exe_dir" }),
-            );
-            return;
-        }
-    };
-    let final_path = dir.join(file_name);
-    match write_wav(&final_path, &samples, sample_rate) {
-        Ok(()) => {
-            info!(
-                "[recorder] saved {} ({} ms, {} samples)",
-                final_path.display(),
-                duration_ms,
-                samples.len()
-            );
-            let _ = app.emit(
-                "recording_finished",
-                serde_json::json!({
-                    "target": target,
-                    "cancelled": false,
-                    "path": final_path.to_string_lossy(),
-                    "durationMs": duration_ms,
-                }),
-            );
-        }
-        Err(e) => {
-            error!("[recorder] write failed: {}", e);
-            let _ = app.emit("recording_error", serde_json::json!({ "error": e }));
+    // 阶段 18 剪裁：不立即写文件，改为 base64 编码推送前端 + 存缓冲待剪裁
+    let samples_base64 = samples_to_base64(&samples);
+    info!(
+        "[recorder] recording completed: {} samples, {} ms, base64 {} bytes",
+        samples.len(),
+        duration_ms,
+        samples_base64.len()
+    );
+
+    // 存到 AppState.recording_buffer 供 save_trimmed 命令读取
+    if let Ok(s) = state.lock() {
+        if let Ok(mut buf) = s.recording_buffer.lock() {
+            *buf = Some((samples, sample_rate));
         }
     }
+
+    // 推送完整数据到前端进入剪裁态
+    let _ = app.emit(
+        "recording_finished",
+        serde_json::json!({
+            "target": target,
+            "cancelled": false,
+            "durationMs": duration_ms,
+            "samplesBase64": samples_base64,
+            "sampleRate": sample_rate,
+        }),
+    );
+}
+
+/// 将 i16 PCM 数组编码为 base64（用于前端 Web Audio）。
+fn samples_to_base64(samples: &[i16]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|s| s.to_le_bytes())
+        .collect();
+    STANDARD.encode(&bytes)
+}
+
+/// 保存剪裁后的音频 — 阶段 18 剪裁命令。
+///
+/// 从 AppState.recording_buffer 读取全程 PCM，截取 [startMs, endMs) 片段，写 WAV。
+pub fn save_trimmed_audio(
+    state: SharedState,
+    target: String,
+    start_ms: u32,
+    end_ms: u32,
+) -> Result<(), String> {
+    let file_name = match target.as_str() {
+        "start" => "按键开启.wav",
+        "stop" => "按键关闭.wav",
+        _ => return Err("invalid target".to_string()),
+    };
+
+    let (samples, sample_rate) = {
+        let s = state.lock().map_err(|e| format!("lock state: {}", e))?;
+        let buf_guard = s
+            .recording_buffer
+            .lock()
+            .map_err(|e| format!("lock buffer: {}", e))?;
+        match buf_guard.as_ref() {
+            Some((samples, sr)) => (samples.clone(), *sr),
+            None => return Err("no recording buffer".to_string()),
+        }
+    };
+
+    if start_ms >= end_ms {
+        return Err("invalid trim range".to_string());
+    }
+
+    let start_idx = ((start_ms as u64 * sample_rate as u64) / 1000) as usize;
+    let end_idx = ((end_ms as u64 * sample_rate as u64) / 1000) as usize;
+    let trimmed = &samples[start_idx.min(samples.len())..end_idx.min(samples.len())];
+
+    if trimmed.is_empty() {
+        return Err("trimmed audio is empty".to_string());
+    }
+
+    info!(
+        "[recorder] saving trimmed: {}ms ~ {}ms ({} samples)",
+        start_ms,
+        end_ms,
+        trimmed.len()
+    );
+
+    // 写前停止正在播放的提示音以释放文件句柄
+    crate::sound::purge_playing();
+
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .ok_or_else(|| "no exe dir".to_string())?;
+    let final_path = dir.join(file_name);
+
+    write_wav(&final_path, trimmed, sample_rate)?;
+    info!("[recorder] trimmed audio saved to {}", final_path.display());
+
+    // 清空缓冲
+    if let Ok(s) = state.lock() {
+        if let Ok(mut buf) = s.recording_buffer.lock() {
+            *buf = None;
+        }
+    }
+
+    Ok(())
 }
 
 /// 恢复运行状态到页面就绪态并清空录制句柄。

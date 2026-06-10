@@ -1046,17 +1046,24 @@ pub fn default_config() -> AppConfig {
 - 录音 PCM 累积到内存，停止时一次性落盘（5s×44100×2B ≈ 440KB，瞬间完成）。
 - 波形数据独立走事件通道，不读主缓冲，避免锁争用。
 
-### 20.3 录制规格
+### 20.3 录制规格与剪裁流程
 
 | 参数 | 值 | 说明 |
 |------|----|------|
 | 采样率 | 44100 Hz | 设备不支持时退回 `default_input_config()` 原生采样率 |
 | 位深 | 16-bit PCM | `PlaySoundW` 必支持，文件最小 |
 | 声道 | mono | 提示音无需立体声 |
-| 最大时长 | 5 秒 | 到上限自动停止并保存 |
+| 最大时长 | 5 秒 | 到上限自动停止进入剪裁态 |
 | 设备 | 系统默认输入 | 不做选择 UI |
 
 > cpal 采集格式可能是 f32/i16/u16，统一在回调内转换为 i16；多声道设备只取第 0 声道降为 mono。
+
+**录制 → 剪裁流程**：
+
+1. 用户点「录制」→ 实时波形 + 倒计时。
+2. 用户点「完成」或 5s 到达 → 后端停止采集，返回 base64 PCM + 采样率 + 时长（经 `recording_finished` 事件），不写盘。
+3. 前端进入**剪裁态**：全长静态波形 + 双标记（起始/结束，初始覆盖 0 ~ duration）。
+4. 用户拖动标记选择保留范围 → 可「试听」选区（Web Audio 不走后端）→ 点「确认」调 `save_trimmed_audio` 命令裁剪写盘，或「取消」丢弃缓冲。
 
 ### 20.4 文件覆盖策略
 
@@ -1072,11 +1079,13 @@ pub fn default_config() -> AppConfig {
 #[tauri::command] fn start_recording(target: String) -> Result<(), String>
 #[tauri::command] fn stop_recording() -> Result<u32, String>   // 返回时长 ms
 #[tauri::command] fn cancel_recording() -> Result<(), String>
+#[tauri::command] fn save_trimmed_audio(target: String, start_ms: u32, end_ms: u32) -> Result<(), String>
 ```
 
 - `target`: `"start"` | `"stop"`。
-- 事件：`recording_amplitude { level }`、`recording_finished { path, durationMs }`、`recording_error { error }`。
+- 事件：`recording_amplitude { level }`、`recording_finished { cancelled, samples_base64?, sample_rate?, duration_ms }`、`recording_error { error }`。
 - 采集流句柄 + 缓冲存于独立的 `RecordingState`（cpal `Stream` 非 Send，单独放在专用结构，不进 `AppState` 主锁；用一个独立 `Mutex` 守护）。
+- `stop_recording` 将 PCM 存入 `AppState.recording_buffer: Arc<Mutex<Option<(Vec<i16>, u32)>>>`，前端剪裁确认后调 `save_trimmed_audio` 从缓冲裁剪写盘。
 
 ### 20.6 状态机与守卫
 
@@ -1088,9 +1097,13 @@ pub fn default_config() -> AppConfig {
 ### 20.7 前端 UI（设置页「提示音」区块）
 
 - 每项一行：状态点（● 已录制 / ○ 未录制 / 🔴 录制中）+ 状态文字 + 试听按钮 + 录制按钮。
-- 录制中该行展开：倒计时 `0:02 / 0:05` + canvas 波形 + [取消] [完成]。
-- canvas：高度约 40px，环形缓冲保留最近 ~150 个幅度采样，`requestAnimationFrame` 重绘。
-- 互斥：录制中禁用其它录制 / 试听按钮；模拟运行中整个区块禁用。
+- **录制中**该行展开：倒计时 `0:02 / 0:05` + canvas 波形（环形缓冲，实时滚动）+ [取消] [完成]。
+- **剪裁中**该行展开：静态 canvas 波形（全长一次性绘制）+ 双标记（起始/结束，可拖动）+ 选区文字 `已选 1.2s ~ 3.5s（2.3秒）` + [试听] [确认] [取消]。
+  - 试听：前端 Web Audio 加载 base64 PCM → `AudioBufferSourceNode.start(0, startS, durS)` 播放选区，不走后端。
+  - 确认：调 `save_trimmed_audio` 裁剪写盘，退出剪裁态。
+  - 取消：丢弃缓冲，退出剪裁态。
+- canvas：录制波形高度 40px（环形缓冲保留最近 ~150 个幅度采样，`requestAnimationFrame` 重绘）；剪裁波形高度 60px（静态全长，选区外半透明遮罩）。
+- 互斥：录制/剪裁中禁用其它录制 / 试听按钮；模拟运行中整个区块禁用。
 
 ### 20.8 错误处理（均不影响主功能）
 

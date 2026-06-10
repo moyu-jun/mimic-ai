@@ -86,7 +86,12 @@ pub struct AppState {
     pub mouse_tx: SyncSender<crate::mouse_worker::MouseEvent>,
     /// 提示音录制句柄（阶段 18）— Some 表示录制进行中，由录制线程管理
     pub recording: crate::sound_recorder::RecordingHandle,
+    /// 录制完成待剪裁的 PCM 缓冲（阶段 18 剪裁）— (samples, sampleRate)
+    pub recording_buffer: RecordingBuffer,
 }
+
+/// PCM 录制缓冲类型：(samples, sampleRate)
+pub type RecordingBuffer = Arc<Mutex<Option<(Vec<i16>, u32)>>>;
 
 /// 共享状态类型（Arc + Mutex 包装）
 pub type SharedState = Arc<Mutex<AppState>>;

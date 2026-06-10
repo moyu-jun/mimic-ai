@@ -386,6 +386,19 @@ fn cancel_recording(state: tauri::State<SharedState>) -> Result<(), String> {
     sound_recorder::cancel_recording(&handle)
 }
 
+/// 保存剪裁后音频 — 阶段 18 剪裁
+///
+/// 从内存缓冲读取全程 PCM，截取 [startMs, endMs) 写 WAV，清空缓冲。
+#[tauri::command]
+fn save_trimmed_audio(
+    target: String,
+    start_ms: u32,
+    end_ms: u32,
+    state: tauri::State<SharedState>,
+) -> Result<(), String> {
+    sound_recorder::save_trimmed_audio(state.inner().clone(), target, start_ms, end_ms)
+}
+
 /// 试听提示音 — 阶段 18
 ///
 /// target: "start" -> 按键开启.wav, "stop" -> 按键关闭.wav。
@@ -554,6 +567,7 @@ pub fn run() {
                 action_tx: action_tx.clone(),
                 mouse_tx: mouse_tx.clone(),
                 recording: sound_recorder::new_handle(),
+                recording_buffer: Arc::new(Mutex::new(None)),
             }));
 
             if matches!(&driver_status, state::DriverStatus::Ready) {
@@ -614,6 +628,7 @@ pub fn run() {
             start_recording,
             stop_recording,
             cancel_recording,
+            save_trimmed_audio,
             preview_sound,
             get_sound_status,
         ])

@@ -476,6 +476,28 @@
 
 ---
 
+### 阶段 18.1：录制后剪裁（原地剪裁）✅
+
+**目标**：录制完成不直接写盘，进入剪裁态（波形 + 双标记），用户裁剪后确认写盘或取消。
+
+**任务**：
+
+1. **后端** — `sound_recorder.rs` 的 `stop_recording` 改为返回 base64 PCM + 元数据，不写盘；`lib.rs` 新增 `save_trimmed_audio` 命令从 `state.recording_buffer` 裁剪写盘；`state.rs` 增 `recording_buffer: RecordingBuffer` 字段。
+2. **前端** — `SettingsPage.vue` 扩展剪裁状态（`trimmingTarget` / `trimmingSamples` / `trimStart/End`）；`unlistenFinished` 改为接收 base64 后进入剪裁态；新增剪裁面板（波形 canvas + 双标记拖动 + 试听/确认/取消按钮）；录制/剪裁各自独立 canvas ref。
+
+**验收清单**：
+
+- [x] `cargo check` / `cargo clippy` 通过，无 warning。
+- [x] `npm run build` 通过，无 TS/Vue 错误。
+- [ ] 实机：点录制 → 说话 → 自停/手动停 → 进入剪裁态（静态波形 + 标记覆盖全长）（⏳ 待实机）。
+- [ ] 实机：拖动标记 → 选区文字实时更新（⏳ 待实机）。
+- [ ] 实机：点"试听" → 听到选区片段（Web Audio）（⏳ 待实机）。
+- [ ] 实机：点"确认" → 文件写入，返回未录制态（⏳ 待实机）。
+- [ ] 实机：点"取消" → 缓冲丢弃，返回未录制态（⏳ 待实机）。
+- [x] 无横向滚动条，滚动条样式同按键/鼠标页。
+
+---
+
 ## 待确认事项跟踪
 
 | # | 事项 | 状态 | 触发动作 |

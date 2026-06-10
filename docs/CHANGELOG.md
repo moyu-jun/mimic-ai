@@ -1780,3 +1780,43 @@ Interception 同进程多 context 对同一设备的事件分发存在竞争，w
 - 实机验证项：真实麦克风采集、5s 自停、波形观感、各错误路径提示，待用户在 Windows 实机确认。
 
 ---
+
+## 阶段 18.1：录制后剪裁（原地剪裁）
+
+**完成时间**：2026-06-11
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/sound_recorder.rs](../src-tauri/src/sound_recorder.rs) | 改 | `stop_recording` 不再直接写文件，改为返回 base64 PCM + 元数据；`recording_finished` 事件增 `samples_base64/sample_rate/duration_ms` 字段 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | `stop_recording` 将 PCM 存入 `state.recording_buffer`；新增 `save_trimmed_audio` 命令从缓冲裁剪后写盘 |
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 改 | 新增 `RecordingBuffer` 类型别名（消除 clippy::type_complexity）；`AppState.recording_buffer` 字段存储待剪裁缓冲 |
+| [src/pages/SettingsPage.vue](../src/pages/SettingsPage.vue) | 改 | 新增剪裁状态（`trimmingTarget/trimmingSamples/trimStart/trimEnd`）；`unlistenFinished` 接收 base64 后进入剪裁态；新增剪裁面板（波形 + 标记拖动 + 试听/确认/取消）；录制/剪裁两个 canvas 分离 ref |
+
+### 关键决策
+
+- **原地剪裁流程**：录制完成 → 后端返回 base64 PCM + 元数据 → 前端进入剪裁态（波形 canvas + 双标记）→ 用户拖动/试听 → 确认后调 `save_trimmed_audio` 裁剪写盘，或取消丢弃缓冲。
+- **Web Audio 试听不写盘**：`AudioContext.createBuffer` 加载 base64 PCM → `AudioBufferSourceNode.start(0, startS, durS)` 播放选区，不走后端命令；确认时再调后端裁剪写文件。
+- **状态隔离**：录制态（`recordingTarget`）与剪裁态（`trimmingTarget`）互斥；试听/录制按钮在对方激活时禁用；录制进度与剪裁进度各自独立。
+- **canvas ref 分离**：`waveCanvasStart/waveCanvasStop` 各自对应录制波形，`trimCanvasStart/trimCanvasStop` 各自对应剪裁波形，避免冲突。
+- **剪裁面板 UI**：静态波形（一次性降采样绘制全长）+ 选区遮罩（左右半透明灰）+ 双标记（ew-resize 手柄）；拖动时实时更新选区文字与遮罩。
+
+### 验证结果
+
+- `cargo check` / `cargo clippy -- -D warnings` 通过，无 warning。
+- `npm run build` 通过（vue-tsc + vite），51 模块，CSS 21.09 kB / JS 108.43 kB。
+- 静态编译验收全部通过，无横向滚动条（CSS 已增 `.trim-panel` 等样式）。
+- 实机验收待用户：录制完成 → 剪裁态 UI、拖动标记、试听选区、确认写盘、取消丢弃。
+
+### 文档回写
+
+- [REQUIREMENTS.md](./REQUIREMENTS.md) § 3.14：追加「保存前可剪裁时间范围」。
+- [DESIGN.md](./DESIGN.md) § 20.3 / 20.6 / 20.8：追加「录制完成进入剪裁态」流程、`save_trimmed_audio` 命令、剪裁面板 UI、Web Audio 试听。
+- [TASKS.md](./TASKS.md)：阶段 18.1 标记为 ✅ 已完成。
+
+### 偏差与遗留
+
+无
+
+---
