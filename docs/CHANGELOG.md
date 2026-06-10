@@ -1699,3 +1699,38 @@ Interception 同进程多 context 对同一设备的事件分发存在竞争，w
 - **拾取期间 listener 持锁 wait**：与键盘热键监听共用同一阻塞 wait，行为一致，无新增风险。
 
 ---
+
+## 阶段 17：热键提示音
+
+**完成时间**：2026-06-10
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/sound.rs](../src-tauri/src/sound.rs) | 新建 76 行 | `PlaySoundW(SND_ASYNC \| SND_FILENAME \| SND_NODEFAULT)`，读 exe 同级 `按键开启.wav` / `按键关闭.wav` |
+| [src-tauri/Cargo.toml](../src-tauri/Cargo.toml) | 改 | `windows-sys` 增 `Win32_Media_Audio` feature |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 导入 `mod sound` |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 3 处 | `handle_start_keyboard`（有勾选动作时）、`handle_start_mouse`（有有效坐标时）、`handle_stop_hotkey`（入口）调 `sound::play_start/stop` |
+
+### 关键决策
+
+- **不引入音频 crate，直接用 Win32**：`PlaySoundW` 调用简单，SND_ASYNC 异步播放、立即返回；同一进程同时只播放一个声音，**新调用自动停止旧声音** → 天然满足「后触发优先、前者被打断」，无需自建队列/混音。
+- **触发点守卫**：仅在状态切换真正生效处播放（有勾选动作 / 有有效坐标 / 真正从 Running 停止），不是「按键按下即播放」。被忽略的热键（运行中按启动 / 待机中按停止）不会进入 handler，天然不播放，无额外判断。
+
+### 验证结果
+
+- `cargo check` / `cargo clippy` 通过（2.21s / 7.33s），无 warning。
+- 实机验收待用户进行：声音播放、被打断、文件缺失不报错。
+
+### 文档回写
+
+- [REQUIREMENTS.md](./REQUIREMENTS.md)：新增 3.13「热键提示音」，明确「生效」语义与打断行为。
+- [DESIGN.md](./DESIGN.md)：新增 18 节，记录技术选型（PlaySoundW）、文件路径、触发点守卫表。
+- [TASKS.md](./TASKS.md)：新增阶段 17，静态验收通过、实机待验。
+
+### 偏差与遗留
+
+无
+
+---

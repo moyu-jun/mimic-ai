@@ -992,6 +992,37 @@ pub fn default_config() -> AppConfig {
 - 关键操作失败时记录 error 级别日志。
 - 驱动未安装/初始化失败时，不阻止应用启动，仅禁用模拟功能。
 
+## 18. 热键提示音
+
+> 对应需求 3.13。在启动/停止热键**生效**时播放提示音。
+
+### 18.1 技术选型
+
+- 采用 Win32 `PlaySoundW`（`windows-sys` 的 `Win32_Media_Audio` feature），不引入额外音频 crate。
+- 调用 `PlaySoundW(path, NULL, SND_ASYNC | SND_FILENAME | SND_NODEFAULT)`：
+  - `SND_ASYNC`：异步播放、立即返回，不阻塞热键监听 / worker 线程。
+  - `SND_FILENAME`：第一参数按文件路径解析（宽字符串，含结尾 NUL）。
+  - `SND_NODEFAULT`：失败时不退回系统默认提示音。
+- **打断语义天然满足**：`PlaySoundW` 同一进程同时只播放一个声音，新调用会立即停止正在播放的旧声音并播放新声音 —— 正好实现"短时间连续触发优先播放后者、前者被打断"。无需自建队列 / 混音。
+
+### 18.2 文件与路径
+
+- 文件位于 exe 同级目录：`按键开启.wav`（启动）、`按键关闭.wav`（停止）。
+- 路径由 `std::env::current_exe().parent()` 拼接；文件不存在时 `log::warn!` 后直接返回，不报错、不阻塞。
+
+### 18.3 触发点（仅在状态切换真正生效处）
+
+模块 [src-tauri/src/sound.rs](../src-tauri/src/sound.rs) 暴露 `play_start()` / `play_stop()`，由 `hotkeys_interception.rs` 在以下位置调用：
+
+| 触发 | 位置 | 守卫 |
+|------|------|------|
+| `play_start` | `handle_start_keyboard` | 仅当有勾选动作（`!selected_actions.is_empty()`）时；空列表会即时回退 Idle，不算启动生效 |
+| `play_start` | `handle_start_mouse` | 在"无有效坐标"早返回之后，确认进入循环时 |
+| `play_stop` | `handle_stop_hotkey` | 该函数仅在 Running* 下按停止键时被调用，即停止真正生效 |
+
+- 被忽略的热键（运行中再按启动、待机中按停止）不会进入上述任一 handler，故不播放，无需额外判断。
+- 启动键 == 停止键的 toggle 场景：由状态机按当前 `runtime_status` 路由到 START / STOP 分支，分别播放对应声音，逻辑天然正确。
+
 ## 19. 方案变更记录
 
 > 本节记录重大技术方案调整，与需求变更记录（REQUIREMENTS.md）交叉引用。

@@ -437,6 +437,25 @@
 
 ---
 
+### 阶段 17：热键提示音
+
+**目标**：启动/停止热键生效时播放提示音，满足"仅生效时播放 + 后触发优先打断前者"。
+
+任务：
+
+1. 新建 [src-tauri/src/sound.rs](src-tauri/src/sound.rs)：`PlaySoundW(SND_ASYNC | SND_FILENAME | SND_NODEFAULT)`，暴露 `play_start` / `play_stop`，文件取 exe 同级 `按键开启.wav` / `按键关闭.wav`。
+2. Cargo 增加 `windows-sys` 的 `Win32_Media_Audio` feature。
+3. 在 `hotkeys_interception.rs` 三处生效点接入：`handle_start_keyboard`（有勾选动作时）、`handle_start_mouse`（有有效坐标时）、`handle_stop_hotkey`（入口）。
+
+**可运行验收**：
+
+- [x] `cargo check` / `cargo clippy` 通过（静态验收通过）。
+- [ ] 实机：F9 启动播放开启音、F10 停止播放关闭音；重复按启动键不再播放（⏳ 待实机）。
+- [ ] 实机：开启/关闭在极短间隔连续触发时，后者打断前者（⏳ 待实机）。
+- [ ] 实机：声音文件缺失时不报错、模拟正常（⏳ 待实机）。
+
+---
+
 ## 待确认事项跟踪
 
 | # | 事项 | 状态 | 触发动作 |

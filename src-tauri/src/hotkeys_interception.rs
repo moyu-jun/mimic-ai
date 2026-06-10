@@ -340,6 +340,12 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
         error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
     }
 
+    // 启动提示音 — 仅在确实有勾选动作（真正进入循环）时播放；
+    // 空列表会在下方 worker 线程内立即回退 Idle，不算启动生效，不播放。
+    if !selected_actions.is_empty() {
+        crate::sound::play_start();
+    }
+
     let app_clone = app.clone();
     let state_clone = state.clone();
     std::thread::spawn(move || {
@@ -444,6 +450,9 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
         );
     }
 
+    // 启动提示音 — 已确认有有效坐标，真正进入鼠标模拟循环
+    crate::sound::play_start();
+
     std::thread::spawn(move || {
         info!(
             "[hotkeys_interception] mouse simulation loop started, {} valid actions",
@@ -478,6 +487,9 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
 /// 停止热键回调 — 状态机门控 — DESIGN 8.3
 fn handle_stop_hotkey(app: &AppHandle, state: &SharedState) {
     info!("[hotkeys_interception] stop triggered: Running* -> Idle");
+
+    // 停止提示音 — 本函数仅在 Running* 状态下按停止键时调用，即停止真正生效。
+    crate::sound::play_stop();
 
     // 设置停止标记
     {

@@ -14,6 +14,7 @@ mod hotkeys_interception;
 mod keyboard_worker;
 mod mouse_picker;
 mod mouse_worker;
+mod sound;
 mod state;
 
 use config::AppConfig;
