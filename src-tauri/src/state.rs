@@ -72,6 +72,8 @@ pub struct AppState {
     pub driver_status: DriverStatus,
     /// 停止标记，供 worker 线程检查
     pub stop_flag: Arc<AtomicBool>,
+    /// 当前坐标拾取的目标行 ID；Some 表示拾取进行中（PickingMouse 状态下由 listener 读取）
+    pub pick_row_id: Option<String>,
     /// 监听专用 context（设置 filter + 阻塞 wait）
     pub interception_listener: Arc<Mutex<Option<SendInterception>>>,
     /// 模拟专用 context（仅 send，非阻塞）

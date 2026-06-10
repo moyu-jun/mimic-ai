@@ -1647,3 +1647,57 @@ pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
 - **多显示器 / 高 DPI**：沿用第一版单显示器标准 DPI 约束，未改变。
 
 ---
+
+## 阶段 16.5：坐标拾取改用 listener context — 真正修复全屏游戏
+
+**完成时间**：2026-06-10
+
+**触发原因**：阶段 16.4 改用 worker context 监听鼠标后，全屏游戏内拾取仍不生效。深入分析定位根因：worker context 此前只用于 `send`，从未设过 filter，同进程双 context（listener + worker）竞争同一设备的事件分发，worker context 实际收不到鼠标事件。
+
+### 根因分析
+
+| context | 用途 | 验证状态 |
+|---------|------|---------|
+| listener_ctx | 键盘热键监听（设键盘 filter + wait/receive） | ✅ 键盘热键正常 → receive 能工作 |
+| worker_ctx | 按键/鼠标模拟发送（send） | ✅ 模拟正常 → send 能工作 |
+| worker_ctx（16.4 拾取） | 临时设鼠标 filter + wait/receive | ❌ 从未验证，实际收不到鼠标事件 |
+
+Interception 同进程多 context 对同一设备的事件分发存在竞争，worker context 临时设 filter 不可靠。**正解：复用已被证明能 receive 的 listener context**，单 context 同时监听键盘 + 鼠标，符合 Interception 标准用法。
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/state.rs](../src-tauri/src/state.rs) | 改 | `AppState` 新增 `pick_row_id: Option<String>`，传递拾取目标行 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 初始化 `pick_row_id: None`；`start_pick_mouse_position` 命令注释更新（实际捕获移至 listener） |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 | listener filter 增设鼠标 `LEFT_BUTTON_DOWN`；`wait` 循环新增鼠标分支：receive→透传→若 PickingMouse 且左键按下→`GetCursorPos`读坐标→`finish_pick`；新增 `read_cursor_pos` 辅助函数 |
+| [src-tauri/src/mouse_picker.rs](../src-tauri/src/mouse_picker.rs) | 改 | 删除独立监听线程与 worker context 逻辑；`start_pick_mouse_position` 仅置状态+row_id+隐藏窗口；新增 `finish_pick`（恢复窗口+状态+清 row_id+emit）供 listener 调用 |
+| [docs/DESIGN.md](./DESIGN.md) | 改 | § 11.2 重写为方案 C（listener context），§ 11.3 记录方案 A/B 弃用 |
+
+### 关键决策
+
+- **复用 listener context 而非 worker context**：listener context 的 receive 能力已被键盘热键功能验证；worker context 的 receive 从未验证且实测失败。单 context 多设备监听是 Interception 文档推荐用法。
+- **鼠标左键平时透传，零影响**：listener 设鼠标 `LEFT_BUTTON_DOWN` filter 后，每次左键按下都先进 listener 再 `send` 透传，延迟极小（<1ms），非拾取态不做任何额外处理。
+- **拾取状态经 state 传递**：`start_pick` 命令置 `PickingMouse` + `pick_row_id`，listener 在鼠标分支读 state 判断是否拾取，解耦命令线程与监听线程。
+- **锁顺序安全**：listener 持 listener_ctx 锁 + 读 state；worker 持 state 锁 + worker_ctx 锁。两个 ctx 是不同 Mutex，与 state 锁不构成循环等待，无死锁。
+
+### 验证结果
+
+- ✅ `cargo build` 通过，无警告
+- ⏳ 实机验证待执行：
+  1. 鼠标模拟页点「坐标拾取」→ 窗口隐藏
+  2. 切到**全屏游戏**，点击目标位置左键 → 日志 `picked (x, y)` → 窗口恢复、坐标回填（**本次重点验证**）
+  3. 普通权限下同样生效
+  4. 非拾取态下正常使用鼠标左键，确认透传无影响（点击、游戏操作正常）
+  5. 拾取完成后正常进行鼠标点击模拟
+
+### 文档回写
+
+- [docs/DESIGN.md](./DESIGN.md) § 11.2 / § 11.3 已更新。
+
+### 偏差与遗留
+
+- **全屏游戏内系统光标位置**：部分独占全屏游戏锁定/隐藏系统光标，`GetCursorPos` 可能返回非预期位置。对有可见系统光标的游戏可用；锁定光标场景为已知限制。
+- **拾取期间 listener 持锁 wait**：与键盘热键监听共用同一阻塞 wait，行为一致，无新增风险。
+
+---

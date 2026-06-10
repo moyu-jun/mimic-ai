@@ -1,31 +1,28 @@
 // 鼠标坐标拾取 — DESIGN 11.2 / TASKS 阶段 14
 //
-// 拾取机制（2026-06-10 改用 Interception）：
-//   - 原方案用 WH_MOUSE_LL 用户态 hook，独占全屏游戏（DirectX exclusive fullscreen）
-//     直接从驱动层取输入，绕过用户态 hook，导致拾取在全屏游戏内失效。
-//   - 新方案复用 Interception 内核驱动监听鼠标：在驱动层捕获左键，全屏游戏同样有效，
-//     且普通权限即可（驱动已工作在内核态，不需要调用方提权）。
+// 拾取机制（2026-06-10 第二次修订：复用热键监听 context）：
+//   - 历史方案 A：WH_MOUSE_LL 用户态 hook —— 被独占全屏游戏绕过，失效。
+//   - 历史方案 B：worker context 单独 wait/receive 鼠标 —— 同进程双 context
+//     竞争同一设备事件分发，worker context 从未设过 filter，实际收不到鼠标事件。
+//   - 当前方案 C：复用「热键监听线程」的 listener context。该 context 已被证明
+//     能正常 receive（键盘热键工作正常）。listener 启动时同时设键盘 + 鼠标左键 filter，
+//     平时鼠标左键透传（零影响），仅在 PickingMouse 状态下捕获坐标。
+//     单 context 是 Interception 标准用法，避免多 context 未定义行为，全屏游戏同样有效。
 //
 // 流程：
-//   - 进入拾取时状态置 PickingMouse 并推送 runtime_status_changed
-//   - 隐藏主窗口，避免遮挡目标点击区域
-//   - 在 worker context 上设置鼠标 filter（仅 LEFT_BUTTON_DOWN），循环 wait_with_timeout
-//   - 捕获到左键：用 GetCursorPos 读屏幕坐标 → 透传点击 → 清除 filter
-//     → 恢复窗口 → 状态回 ReadyMouse → 发 mouse_position_picked
-//   - context 不可用或异常：清除 filter（best-effort）+ 恢复窗口 + 发 simulation_error
+//   - start_pick_mouse_position 命令：置 PickingMouse、记录 row_id、隐藏窗口（不开线程）。
+//   - listener 线程在 wait 循环中收到鼠标左键按下，若处于 PickingMouse：
+//     用 GetCursorPos 读屏幕坐标 → 透传点击 → 调 finish_pick 恢复窗口 + emit。
 //
-// 设备/坐标说明：
-//   - Interception 鼠标 stroke 的 x/y 是相对/绝对移动量，不是屏幕坐标，
-//     故命中后用 GetCursorPos 读取系统光标位置作为拾取结果。
-//   - 拾取期间状态为 PickingMouse，mouse_worker / keyboard_worker 的状态门控
-//     使其不发送，故拾取线程独占 worker context 设置 filter 是安全的。
+// 坐标说明：Interception 鼠标 stroke 的 x/y 是移动量而非屏幕坐标，故用 GetCursorPos
+// 读取系统光标位置作为拾取结果（单显示器 / 标准 DPI）。
 
 use crate::state::{RuntimeStatus, SharedState};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// 拾取入口 — 切状态 + 隐藏窗口 + 启动 Interception 监听线程。
+/// 拾取入口 — 置 PickingMouse + 记录 row_id + 隐藏窗口。
 ///
-/// 运行态守卫由调用方（lib.rs 命令）负责，此处假定已处于可拾取状态。
+/// 实际坐标捕获由热键监听线程在 PickingMouse 状态下完成（见 finish_pick）。
 pub fn start_pick_mouse_position(
     app: AppHandle,
     state: SharedState,
@@ -33,21 +30,13 @@ pub fn start_pick_mouse_position(
 ) -> Result<(), String> {
     log::info!("[mouse_picker] start picking for row {}", row_id);
 
-    // 拾取需要 worker context（Interception 监听）。提前取出，None 直接报错返回。
-    #[cfg(windows)]
-    let worker_ctx = {
-        let app_state = state
-            .lock()
-            .map_err(|e| format!("Failed to lock state: {}", e))?;
-        app_state.interception_worker.clone()
-    };
-
-    // 1. 状态置 PickingMouse
+    // 1. 状态置 PickingMouse + 记录目标行
     {
         let mut app_state = state
             .lock()
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         app_state.runtime_status = RuntimeStatus::PickingMouse;
+        app_state.pick_row_id = Some(row_id);
     }
     emit_status(&app, RuntimeStatus::PickingMouse);
 
@@ -60,22 +49,45 @@ pub fn start_pick_mouse_position(
         log::warn!("[mouse_picker] main window not found, picking without hiding");
     }
 
-    // 3. 启动 Interception 监听线程
-    #[cfg(windows)]
-    {
-        std::thread::spawn(move || {
-            windows_impl::run_picker(app, state, row_id, worker_ctx);
-        });
-    }
-
-    // 非 Windows 平台不可能进入真实运行环境，直接恢复以免界面卡在 PickingMouse。
-    #[cfg(not(windows))]
-    {
-        restore_with_error(&app, &state, "mouse picking is only supported on Windows");
-        let _ = row_id;
-    }
-
     Ok(())
+}
+
+/// 拾取完成处理 — 由 listener 线程在捕获到左键坐标后调用。
+///
+/// 恢复窗口、状态回 ReadyMouse、清除 pick_row_id、发送 mouse_position_picked。
+pub fn finish_pick(app: &AppHandle, state: &SharedState, x: i32, y: i32) {
+    let row_id = {
+        let mut app_state = match state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("[mouse_picker] finish_pick: failed to lock state: {}", e);
+                return;
+            }
+        };
+        app_state.runtime_status = RuntimeStatus::ReadyMouse;
+        app_state.pick_row_id.take()
+    };
+
+    let row_id = match row_id {
+        Some(id) => id,
+        None => {
+            log::warn!("[mouse_picker] finish_pick called but pick_row_id is None");
+            restore_window_on_main(app);
+            emit_status(app, RuntimeStatus::ReadyMouse);
+            return;
+        }
+    };
+
+    log::info!("[mouse_picker] picked ({}, {}) for row {}", x, y, row_id);
+    restore_window_on_main(app);
+    emit_status(app, RuntimeStatus::ReadyMouse);
+
+    if let Err(e) = app.emit(
+        "mouse_position_picked",
+        serde_json::json!({ "rowId": row_id, "x": x, "y": y }),
+    ) {
+        log::error!("[mouse_picker] failed to emit mouse_position_picked: {}", e);
+    }
 }
 
 /// 发送 runtime_status_changed 事件。
@@ -88,19 +100,10 @@ fn emit_status(app: &AppHandle, status: RuntimeStatus) {
     }
 }
 
-/// 恢复窗口 + 状态回 ReadyMouse（拾取成功路径调用）。
-///
-/// 窗口显示/聚焦操作 marshal 到主线程执行：Windows 窗口有线程亲和性，
-/// 从拾取后台线程直接调用 show()/set_focus() 在隐藏后不可靠（前台锁定限制）。
-fn restore_window_and_ready(app: &AppHandle, state: &SharedState) {
-    restore_window_on_main(app);
-    if let Ok(mut app_state) = state.lock() {
-        app_state.runtime_status = RuntimeStatus::ReadyMouse;
-    }
-    emit_status(app, RuntimeStatus::ReadyMouse);
-}
-
 /// 在主线程恢复并聚焦主窗口（show + unminimize + set_focus）。
+///
+/// 窗口在主线程创建，从后台线程直接 show()/set_focus() 受 Windows 前台锁定限制
+/// 不可靠，必须 marshal 回主线程执行。
 fn restore_window_on_main(app: &AppHandle) {
     let app_clone = app.clone();
     let dispatched = app.run_on_main_thread(move || {
@@ -124,148 +127,5 @@ fn restore_window_on_main(app: &AppHandle) {
     });
     if let Err(e) = dispatched {
         log::error!("[mouse_picker] run_on_main_thread dispatch failed: {}", e);
-    }
-}
-
-/// 恢复窗口 + 状态回 ReadyMouse + 发 simulation_error（异常路径调用）。
-#[cfg_attr(not(windows), allow(dead_code))]
-fn restore_with_error(app: &AppHandle, state: &SharedState, error: &str) {
-    log::error!("[mouse_picker] picking failed: {}", error);
-    restore_window_and_ready(app, state);
-    if let Err(e) = app.emit("simulation_error", serde_json::json!({ "error": error })) {
-        log::error!("[mouse_picker] failed to emit simulation_error: {}", e);
-    }
-}
-
-#[cfg(windows)]
-mod windows_impl {
-    use super::{restore_window_and_ready, restore_with_error};
-    use crate::state::{SendInterception, SharedState};
-    use interception::{Filter, MouseFilter, MouseState, Stroke};
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-    use tauri::{AppHandle, Emitter};
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
-    /// 匹配所有鼠标设备的 predicate。
-    extern "C" fn is_mouse_device(device: i32) -> bool {
-        interception::is_mouse(device)
-    }
-
-    /// 在独立线程内执行：设置鼠标 filter → 等待左键按下 → 读坐标 → 清 filter → 回填。
-    ///
-    /// 复用 worker context（Interception 内核驱动），在驱动层捕获左键，
-    /// 独占全屏游戏内同样有效，且不需要管理员权限。
-    pub fn run_picker(
-        app: AppHandle,
-        state: SharedState,
-        row_id: String,
-        ctx: Arc<Mutex<Option<SendInterception>>>,
-    ) {
-        // 全程持有 context 锁：拾取期间状态为 PickingMouse，worker 不发送，独占安全。
-        let ctx_guard = match ctx.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                restore_with_error(&app, &state, &format!("failed to lock context: {}", e));
-                return;
-            }
-        };
-
-        let interception = match ctx_guard.as_ref() {
-            Some(i) => &i.0,
-            None => {
-                restore_with_error(
-                    &app,
-                    &state,
-                    "Interception context not available (driver not ready)",
-                );
-                return;
-            }
-        };
-
-        // 设置鼠标 filter：仅监听左键按下事件。
-        interception.set_filter(
-            is_mouse_device,
-            Filter::MouseFilter(MouseFilter::LEFT_BUTTON_DOWN),
-        );
-        log::info!("[mouse_picker] mouse filter set, waiting for left click");
-
-        // 循环等待左键按下；wait_with_timeout 返回 0 = 超时，>0 = 命中设备号。
-        let mut captured: Option<(i32, i32)> = None;
-        let mut error: Option<String> = None;
-
-        loop {
-            let device = interception.wait_with_timeout(Duration::from_millis(100));
-            if device == 0 {
-                // 超时，继续等待（用户尚未点击）。
-                continue;
-            }
-            if !interception::is_mouse(device) {
-                continue;
-            }
-
-            let mut strokes = [Stroke::Mouse {
-                state: MouseState::empty(),
-                flags: interception::MouseFlags::empty(),
-                rolling: 0,
-                x: 0,
-                y: 0,
-                information: 0,
-            }; 16];
-
-            let count = interception.receive(device, &mut strokes);
-            if count == 0 {
-                continue;
-            }
-
-            let mut hit = false;
-            for stroke in strokes.iter().take(count as usize) {
-                // 透传事件，保持目标窗口点击行为不变。
-                interception.send(device, &[*stroke]);
-                if let Stroke::Mouse { state: ms, .. } = stroke {
-                    if ms.contains(MouseState::LEFT_BUTTON_DOWN) {
-                        hit = true;
-                    }
-                }
-            }
-
-            if hit {
-                // 用 GetCursorPos 读屏幕坐标（Interception stroke 不含屏幕坐标）。
-                let mut pt = POINT { x: 0, y: 0 };
-                let ok = unsafe { GetCursorPos(&mut pt) };
-                if ok != 0 {
-                    captured = Some((pt.x, pt.y));
-                } else {
-                    error = Some("GetCursorPos failed".to_string());
-                }
-                break;
-            }
-        }
-
-        // 清除 filter，恢复 worker context 正常状态（关键：否则会持续拦截鼠标）。
-        interception.set_filter(is_mouse_device, Filter::MouseFilter(MouseFilter::empty()));
-        log::info!("[mouse_picker] mouse filter cleared");
-        drop(ctx_guard);
-
-        match captured {
-            Some((x, y)) => {
-                log::info!("[mouse_picker] picked ({}, {}) for row {}", x, y, row_id);
-                restore_window_and_ready(&app, &state);
-                if let Err(e) = app.emit(
-                    "mouse_position_picked",
-                    serde_json::json!({ "rowId": row_id, "x": x, "y": y }),
-                ) {
-                    log::error!("[mouse_picker] failed to emit mouse_position_picked: {}", e);
-                }
-            }
-            None => {
-                restore_with_error(
-                    &app,
-                    &state,
-                    error.as_deref().unwrap_or("picking ended without capture"),
-                );
-            }
-        }
     }
 }

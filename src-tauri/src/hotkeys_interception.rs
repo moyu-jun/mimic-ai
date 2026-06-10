@@ -34,17 +34,26 @@ pub fn start_hotkey_listener(
 
             match ctx_guard.as_ref() {
                 Some(i) => {
-                    use interception::{Filter, KeyFilter};
+                    use interception::{Filter, KeyFilter, MouseFilter};
                     // Predicate: 匹配所有键盘设备
                     extern "C" fn is_keyboard_device(device: i32) -> bool {
                         interception::is_keyboard(device)
                     }
-                    // 设置过滤器: DOWN + UP 事件
+                    // Predicate: 匹配所有鼠标设备
+                    extern "C" fn is_mouse_device(device: i32) -> bool {
+                        interception::is_mouse(device)
+                    }
+                    // 键盘过滤器: DOWN + UP 事件（热键监听）
                     i.0.set_filter(
                         is_keyboard_device,
                         Filter::KeyFilter(KeyFilter::DOWN | KeyFilter::UP),
                     );
-                    info!("[hotkeys_interception] keyboard filter set");
+                    // 鼠标过滤器: 仅左键按下（坐标拾取用，平时透传零影响）
+                    i.0.set_filter(
+                        is_mouse_device,
+                        Filter::MouseFilter(MouseFilter::LEFT_BUTTON_DOWN),
+                    );
+                    info!("[hotkeys_interception] keyboard + mouse filter set");
                     true
                 }
                 None => {
@@ -79,10 +88,67 @@ pub fn start_hotkey_listener(
                 }
             };
 
-            // 等待键盘事件
+            // 等待键盘 / 鼠标事件
             let device = interception.wait();
+
+            // 鼠标事件分支 — 坐标拾取（PickingMouse 时捕获）/ 平时透传
+            if interception::is_mouse(device) {
+                use interception::{MouseFlags, MouseState};
+                let mut mstrokes = [Stroke::Mouse {
+                    state: MouseState::empty(),
+                    flags: MouseFlags::empty(),
+                    rolling: 0,
+                    x: 0,
+                    y: 0,
+                    information: 0,
+                }; 16];
+
+                let mcount = interception.receive(device, &mut mstrokes);
+                if mcount == 0 {
+                    continue;
+                }
+
+                // 透传所有鼠标事件，保持目标窗口行为不变；记录是否有左键按下
+                let mut left_down = false;
+                for stroke in mstrokes.iter().take(mcount as usize) {
+                    interception.send(device, &[*stroke]);
+                    if let Stroke::Mouse { state: ms, .. } = stroke {
+                        if ms.contains(MouseState::LEFT_BUTTON_DOWN) {
+                            left_down = true;
+                        }
+                    }
+                }
+
+                if !left_down {
+                    continue;
+                }
+
+                // 是否处于拾取态
+                let picking = match state.lock() {
+                    Ok(s) => matches!(s.runtime_status, RuntimeStatus::PickingMouse),
+                    Err(_) => false,
+                };
+
+                if picking {
+                    // 读屏幕坐标（Interception stroke 不含屏幕坐标）
+                    let coords = read_cursor_pos();
+                    // 先释放 context 锁，finish_pick 内部仅操作 state / 主线程
+                    drop(ctx_guard);
+                    match coords {
+                        Some((x, y)) => {
+                            crate::mouse_picker::finish_pick(&app, &state, x, y);
+                        }
+                        None => {
+                            error!("[hotkeys_interception] GetCursorPos failed during pick");
+                            // 坐标读取失败也恢复窗口，避免界面卡在 PickingMouse
+                            crate::mouse_picker::finish_pick(&app, &state, 0, 0);
+                        }
+                    }
+                }
+                continue;
+            }
+
             if !interception::is_keyboard(device) {
-                // 非键盘设备，直接透传
                 continue;
             }
 
@@ -209,6 +275,27 @@ pub fn start_hotkey_listener(
     });
 
     Ok(())
+}
+
+/// 读取系统光标屏幕坐标 — 坐标拾取用。
+///
+/// Interception 鼠标 stroke 的 x/y 是移动量而非屏幕坐标，故用 GetCursorPos
+/// 读取系统光标位置。失败返回 None（极罕见）。
+#[cfg(windows)]
+fn read_cursor_pos() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut pt = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut pt) } != 0 {
+        Some((pt.x, pt.y))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(windows))]
+fn read_cursor_pos() -> Option<(i32, i32)> {
+    None
 }
 
 /// 启动热键回调 — 状态机门控 + 页面过滤 — DESIGN 8.3 / 阶段 15

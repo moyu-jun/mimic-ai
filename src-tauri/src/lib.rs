@@ -293,10 +293,11 @@ fn get_runtime_status(state: tauri::State<SharedState>) -> Result<RuntimeStatus,
     Ok(app_state.runtime_status.clone())
 }
 
-/// 鼠标坐标拾取 — DESIGN 11.2 / 阶段 14
+/// 鼠标坐标拾取 — DESIGN 11.2 / 阶段 14（2026-06-10 改用 listener 监听）
 ///
 /// 仅可从 ReadyMouse 状态进入；运行 / 拾取中直接拒绝（运行态守卫，DESIGN 6.1）。
-/// 进入后切到 PickingMouse、隐藏窗口、注册 low-level mouse hook 等待一次左键点击。
+/// 进入后切到 PickingMouse、记录 row_id、隐藏窗口；实际坐标捕获由热键监听线程
+/// （已同时监听键盘+鼠标左键）在 PickingMouse 状态下完成。
 #[tauri::command]
 fn start_pick_mouse_position(
     row_id: String,
@@ -462,6 +463,7 @@ pub fn run() {
                 runtime_status: RuntimeStatus::Idle,
                 driver_status: driver_status.clone(),
                 stop_flag: Arc::new(AtomicBool::new(false)),
+                pick_row_id: None,
                 interception_listener: listener_ctx.clone(),
                 interception_worker: worker_ctx.clone(),
                 action_tx: action_tx.clone(),
