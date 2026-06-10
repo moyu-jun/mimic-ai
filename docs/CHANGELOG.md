@@ -1464,39 +1464,46 @@ pub action_tx: SyncSender<crate::keyboard_worker::ActionEvent>,
 
 **完成时间**：2026-06-10
 
-**触发原因**：用户反馈设置完启动/停止热键后，在按键模拟页和鼠标模拟页按热键无响应。经排查，根因是 P2-3（`set_current_page` 不切换 Ready 状态）虽不直接导致热键失效（listener 在 `Idle` 时也能触发启动键），但状态栏显示不准确，且缺乏诊断日志无法快速定位页面过滤或扫描码匹配问题。
+**触发原因**：用户反馈设置完启动/停止热键后，在按键模拟页和鼠标模拟页按热键无响应。
+
+**根因定位**（通过诊断日志）：
+```
+[hotkeys_interception] hotkey matched: code=88, start_code=47, stop_code=88, page=mouse, status=ReadyKeyboard
+```
+
+1. **状态机门控缺陷**（核心根因）— listener 状态机仅匹配 `Idle` 状态下的启动键，但 P2-3 修复后进入模拟页会切到 `ReadyKeyboard`/`ReadyMouse`，导致启动键匹配失败被透传。
+2. **Ready 状态间切换缺失** — P2-3 初版仅处理 `Idle → Ready*`，从按键页切到鼠标页时 `ReadyKeyboard` 不会更新为 `ReadyMouse`，状态与页面不一致。
 
 ### 改动摘要
 
 | 文件 | 改动类型 | 关键点 |
 |------|---------|--------|
-| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | `set_current_page` 增加 `app: AppHandle` 参数；Idle 状态下根据页面切换到对应 Ready 状态（keyboard→ReadyKeyboard, mouse→ReadyMouse）；发送 `runtime_status_changed` 事件；日志同时打印 page 和 status |
-| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 | 热键匹配成功时增加 `info!` 日志，记录扫描码、配置值、当前页面、运行状态；页面过滤拦截时单独记录 `current_page` 方便诊断 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | `set_current_page` 增加 `app: AppHandle` 参数；**非 Running*/PickingMouse 状态下**根据页面切换 Ready 状态（Idle/ReadyKeyboard/ReadyMouse → 目标 Ready 状态），支持 Ready 状态间切换；发送 `runtime_status_changed` 事件；日志同时打印 page 和 status |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 | 状态机启动键分支从 `Idle if is_start_key` 扩展为 `Idle \| ReadyKeyboard \| ReadyMouse if is_start_key`，支持 Ready 状态下触发启动；热键匹配成功时增加 `info!` 日志，记录扫描码、配置值、当前页面、运行状态；页面过滤拦截时单独记录 `current_page` 方便诊断 |
 
 ### 关键决策
 
-- **P2-3 修复时机**：虽然该 bug 不影响热键功能（listener 状态机在 `Idle` 时可触发启动键），但状态栏显示错误（进入按键页显示"待机"而非"当前可启动按键模拟"）会混淆用户。与诊断日志一并修复，提升排查效率。
-- **日志粒度**：热键匹配成功时记录完整上下文（扫描码、配置、页面、状态），页面过滤拦截时单独记录 `current_page`——前者帮助确认扫描码匹配正确，后者快速定位页面不同步问题。
-- **不同步 app 事件与修改 state**：P2-3 修复中先释放状态锁再发送事件，避免持锁期间阻塞事件回调。
+- **状态机扩展 Ready* 分支**：原设计假设用户在 `Idle` 时按启动键，但 P2-3 引入 Ready 状态后，进入模拟页时状态已不是 `Idle`，必须同步扩展状态机匹配条件。
+- **Ready 状态间互相切换**：用户可能从按键页直接切到鼠标页（不经过首页），需要 `ReadyKeyboard ↔ ReadyMouse` 转换，而非仅支持 `Idle → Ready*`。
+- **日志先行诊断**：第一次修复仅实现 P2-3 和日志增强，实机测试后通过日志快速定位状态机缺陷，避免盲目猜测。
 
 ### 验证结果
 
-- ✅ `cargo check` 通过，无编译错误
-- ⏳ 实机验证待执行：
-  1. 启动应用 → 进入按键模拟页 → 状态栏显示"当前可启动按键模拟"（之前显示"待机"）
-  2. 按启动热键 → 观察日志 `[hotkeys_interception] hotkey matched: code=..., page=keyboard, status=ReadyKeyboard` → 模拟启动
-  3. 如果热键不生效，查日志：
-     - 无 `hotkey matched` 日志 → 扫描码不匹配或驱动未就绪
-     - 有 `hotkey blocked by page filter` 日志 → `set_current_page` 未成功调用或 page 值不对
+- ✅ `cargo build` 通过，无编译错误
+- ✅ 实机日志确认根因：`status=ReadyKeyboard` 但 `page=mouse`，且状态机未匹配 Ready 状态下的启动键
+- ⏳ 修复后实机验证待执行：
+  1. 启动应用 → 进入按键模拟页 → 日志显示 `page=keyboard, status=ReadyKeyboard`
+  2. 切换到鼠标模拟页 → 日志显示 `page=mouse, status=ReadyMouse`（之前停留在 `ReadyKeyboard`）
+  3. 按启动热键 → 日志显示 `hotkey matched` 且状态为 `ReadyMouse` → 模拟启动
 
 ### 文档回写
 
-无（本次修复为代码层增强，不涉及需求/设计/任务变更）
+无（本次修复为代码层 bug 修复，不涉及需求/设计/任务变更）
 
 ### 偏差与遗留
 
-- **P2-2（E0 扩展键匹配错误）仍未修复**：Right Ctrl (157) / Right Alt (184) 作为热键时，由于 scanCode 包含 E0 位而 listener 匹配逻辑仅用 `*code as u16` 直接比较，永远匹配不上。REVIEW-12-13-FIX-PLAN.md 已给出修复方案（判断 `KeyState::E0` 标志并加高位），留待实机验证后修复。
-- **P0-4（错误的设备选择）仍未修复**：`keyboard_worker.rs` 硬编码遍历 1-10 设备，应按 DESIGN § 12.4 改为 1-20。留待实机验证后修复。
-- **热键设置后不生效的真实根因待实机验证确认**：当前假设是页面过滤或扫描码匹配问题，日志增强后可快速定位。如实机仍不生效且日志显示匹配成功，需排查驱动是否正常初始化、filter 是否生效、以及前端 `set_current_page` 调用链是否完整。
+- **用户配置的启动键与停止键不一致**：日志显示 `start_code=47`(V键) 但用户按的是 `code=88`(F12)，说明配置文件中启动键被设为 V 而非 F12。这可能是测试时的配置，或 INI 文件未正确持久化用户修改。建议用户在设置页重新设置并保存热键。
+- **P2-2（E0 扩展键匹配错误）仍未修复**：Right Ctrl (157) / Right Alt (184) 作为热键时永远匹配不上。留待后续修复。
+- **P0-4（错误的设备选择）仍未修复**：`keyboard_worker.rs` 硬编码遍历 1-10 设备，应改为 1-20。留待后续修复。
 
 ---

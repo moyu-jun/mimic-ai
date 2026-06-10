@@ -155,8 +155,15 @@ pub fn start_hotkey_listener(
 
                             // 状态机门控：根据当前状态决定行为（支持 toggle）
                             match runtime_status {
-                                RuntimeStatus::Idle if is_start_key => {
-                                    // Idle 状态下按启动键 → 启动模拟
+                                RuntimeStatus::Idle
+                                | RuntimeStatus::ReadyKeyboard
+                                | RuntimeStatus::ReadyMouse
+                                    if is_start_key =>
+                                {
+                                    // Idle/Ready* 状态下按启动键 → 启动模拟
+                                    info!(
+                                        "[hotkeys_interception] state machine: START branch matched, calling handle_start_hotkey"
+                                    );
                                     handle_start_hotkey(&app, &state, current_page.as_str());
                                     // 阻断热键事件，不透传到系统
                                     continue;
@@ -165,17 +172,24 @@ pub fn start_hotkey_listener(
                                     if is_stop_key =>
                                 {
                                     // Running 状态下按停止键 → 停止模拟
+                                    info!(
+                                        "[hotkeys_interception] state machine: STOP branch matched"
+                                    );
                                     handle_stop_hotkey(&app, &state);
                                     // 阻断热键事件
                                     continue;
                                 }
                                 RuntimeStatus::Idle if is_stop_key => {
                                     // Idle 状态下按停止键 → 阻断（不透传）
-                                    info!("[hotkeys_interception] stop key pressed in Idle state, ignoring");
+                                    info!("[hotkeys_interception] state machine: IDLE+STOP branch, ignoring");
                                     continue;
                                 }
                                 _ => {
                                     // 状态不匹配（如 Running 时按启动键），透传
+                                    info!(
+                                        "[hotkeys_interception] state machine: FALLTHROUGH branch (no match), passing through. is_start_key={}, is_stop_key={}",
+                                        is_start_key, is_stop_key
+                                    );
                                     interception.send(device, &[*stroke]);
                                     continue;
                                 }
@@ -199,6 +213,10 @@ pub fn start_hotkey_listener(
 
 /// 启动热键回调 — 状态机门控 + 页面过滤 — DESIGN 8.3 / 阶段 15
 fn handle_start_hotkey(app: &AppHandle, state: &SharedState, current_page: &str) {
+    info!(
+        "[hotkeys_interception] handle_start_hotkey called: current_page={}",
+        current_page
+    );
     if current_page == "keyboard" {
         handle_start_keyboard(app, state);
     } else {

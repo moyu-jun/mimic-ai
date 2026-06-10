@@ -186,13 +186,19 @@ fn set_current_page(
             .map_err(|e| format!("Failed to lock state: {}", e))?;
         app_state.current_page = page.clone();
 
-        // P2-3: Idle 状态下根据页面切换到对应 Ready 状态
-        if app_state.runtime_status == RuntimeStatus::Idle {
-            app_state.runtime_status = match page.as_str() {
-                "keyboard" => RuntimeStatus::ReadyKeyboard,
-                "mouse" => RuntimeStatus::ReadyMouse,
-                _ => RuntimeStatus::Idle,
-            };
+        // P2-3: 非 Running*/PickingMouse 状态下根据页面切换到对应 Ready 状态
+        // 修复: Ready 状态间也需要切换 (ReadyKeyboard ↔ ReadyMouse)
+        match app_state.runtime_status {
+            RuntimeStatus::Idle | RuntimeStatus::ReadyKeyboard | RuntimeStatus::ReadyMouse => {
+                app_state.runtime_status = match page.as_str() {
+                    "keyboard" => RuntimeStatus::ReadyKeyboard,
+                    "mouse" => RuntimeStatus::ReadyMouse,
+                    _ => RuntimeStatus::Idle,
+                };
+            }
+            _ => {
+                // Running*/PickingMouse/Error 状态不变
+            }
         }
 
         log::info!(
