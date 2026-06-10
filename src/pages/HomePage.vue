@@ -125,7 +125,7 @@ onMounted(async () => {
     >
       <span class="status-icon">{{ isAdmin ? '✓' : '!' }}</span>
       <span class="status-text">
-        {{ isAdmin ? '管理员权限已授予' : '管理员权限受限,部分功能不可用' }}
+        {{ isAdmin ? '管理员权限已授予' : '管理员权限受限，安装驱动需提权' }}
       </span>
       <button
         v-if="!isAdmin"

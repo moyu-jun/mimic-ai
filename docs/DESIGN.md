@@ -717,52 +717,53 @@ Tauri `setup` 钩子中必须按以下顺序执行，热键注册依赖已加载
 
 代码中关键位置添加 `// ADMIN_POLICY: ...` 标记，方便后续手动调整策略。
 
-> 当前定稿策略：应用启动时即通过 UAC 请求管理员权限（见需求 2 节），驱动安装与模拟运行共用该权限。下方标记用于后续若放宽策略时快速定位。
+> 当前定稿策略（2026-06-10 更新）：应用启动**不主动请求** UAC，仅驱动安装命令需要管理员；模拟运行（热键监听 + 按键/鼠标 worker）在普通权限下即可工作。下方标记用于后续若再调整策略时快速定位。
 
 示例：
 
 ```rust
-// ADMIN_POLICY: Application requires admin rights at startup (UAC elevation)
-// ADMIN_POLICY: Driver installation requires admin rights
+// ADMIN_POLICY: Application starts WITHOUT admin elevation (no startup UAC)
+// ADMIN_POLICY: Driver installation requires admin rights (guarded in install command)
 pub fn install_interception_driver() -> Result<(), String> {
     // ...
 }
 
-// ADMIN_POLICY: Simulation runtime requires admin rights (covered by startup elevation)
+// ADMIN_POLICY: Simulation runtime does NOT require admin (after driver loaded)
 pub fn run_keyboard_simulation() {
     // ...
 }
 ```
 
-### 14.1 启动提权配置（更新：启动期请求 + 拒绝降级）
+### 14.1 启动提权配置（2026-06-10 更新：按需提权）
 
-**策略变更**：启动时主动请求 UAC 提权，用户拒绝时降级启动（对应反馈 L11/E8/Q1）。
+**策略变更**：启动时**不再**主动请求 UAC，应用以普通权限运行。仅「安装驱动」时按需引导提权。
 
-- **检测管理员权限**：进入 `tauri::Builder` 之前，调用 Windows API 检查当前进程是否以管理员身份运行。
-- **未授权时主动请求提权**：`ShellExecuteW + "runas"` 触发 UAC 弹窗：
-  - **用户同意** → 新提权进程接管，当前进程立即 `std::process::exit(0)` 退出，避免双开。
-  - **用户拒绝**（或 UAC 调度失败）→ 当前进程继续以普通权限启动，进入降级模式：
-    - 应用正常打开，不阻断启动流程。
-    - 首页显示「管理员权限受限，部分功能不可用」（橙色警告）+「以管理员身份重启」按钮。
-    - 驱动检测可正常执行（读注册表 + 文件系统，不需管理员权限）。
-    - 驱动安装需管理员权限：点击「安装驱动」按钮时，后端通过 `runas` 以管理员身份重启安装进程，安装完成后自动退出，用户需手动重启应用。
-    - 模拟运行需管理员权限：启动热键触发时检查权限，无权限时拒绝并提示「需要管理员权限」。
+- **启动行为**：
+  - 应用进程以调用方权限启动（普通用户即可），不调用 `ShellExecuteW("runas")`。
+  - manifest 不含 `requireAdministrator`。
+  - 启动后通过 `is_admin()` 检测当前权限，仅作首页状态展示。
 
-- **已授权时行为**：
-  - 首页显示「管理员权限已授予」（绿色图标）。
-  - 驱动安装、模拟运行均可正常执行。
+- **首页权限状态**：
+  - 已授权 → 绿色「管理员权限已授予」。
+  - 未授权 → 橙色「管理员权限受限，安装驱动需提权」+「以管理员身份重启」按钮（用户主动点击才触发 UAC）。
 
-**实现方式**：不在 manifest 中强制 `requireAdministrator`，而是运行时检测权限状态并由 Rust 主动调用 `ShellExecuteW("runas")`。这样获得「拒绝 UAC 即降级」的灵活性，避免 manifest `requireAdministrator` 在拒绝时直接让应用启动失败。
+- **驱动安装**：
+  - `install_interception_driver` 命令入口检查 `is_admin()`，未授权直接返回 `Err("permission_denied")`。
+  - 前端收到 `permission_denied` → 提示「请点击上方"以管理员身份重启"按钮」。
+  - 用户点击重启按钮 → `request_admin_restart` → `ShellExecuteW("runas")` 触发 UAC → 重启进程为管理员 → 再点「安装驱动」即可正常调度安装器。
+
+- **模拟运行**：
+  - 驱动安装并加载后，热键监听与按键/鼠标 worker 均通过 Interception 用户态接口工作，**不需要管理员权限**。
+  - 即使应用是普通权限启动，只要驱动已就绪（`DriverStatus::Ready`），所有模拟功能可用。
+
+**实现方式**：保留 `admin::is_admin()` / `admin::restart_as_admin()` 不变；移除 `pub fn run()` 入口处的启动期 UAC 请求逻辑；`install_interception_driver` 与 `reboot_system` 命令保留运行时权限守卫。
 
 ### 14.2 阶段 10 落地形态
 
 - 后端模块 `src-tauri/src/admin.rs`，依赖 `windows-sys` 0.59（Win32_Foundation / Win32_Security / Win32_System_Threading / Win32_UI_Shell），仅在 `#[cfg(windows)]` 下提供真实实现。
 - `is_admin()` → `OpenProcessToken(GetCurrentProcess, TOKEN_QUERY)` + `GetTokenInformation(TokenElevation)`；任一 API 失败均视为「非管理员」并 `log::warn!`。
 - `restart_as_admin()` → `ShellExecuteW` 以 `runas` verb 拉起当前 exe 路径，失败返回错误字符串（用户取消 UAC 也算失败）。
-- **启动期 UAC 请求**（`pub fn run()` 入口）：在 `tauri::Builder` 装配前先调 `is_admin()`：
-  - 已提权 → `eprintln!("already elevated")` 后继续。
-  - 未提权 → `restart_as_admin()`：成功 → `std::process::exit(0)`；失败 → `eprintln!` 记录后降级继续。
-  - 此时 tauri-plugin-log 尚未装配，使用 `eprintln!` 走 stderr（dev 控制台可见）；setup 阶段会再调一次 `is_admin()` 通过插件正式入日志。
+- **启动期不再调用 UAC**（2026-06-10 调整）：`pub fn run()` 入口直接进入 `tauri::Builder`，不再 `is_admin()` + `restart_as_admin()`。setup 阶段仍调用 `is_admin()` 用于首页状态展示与命令守卫。
 - Tauri 命令：
   - `get_admin_status() -> bool`（首页 onMounted 调用，用于判断显示绿色「已授予」还是橙色「受限」）
   - `request_admin_restart(app: AppHandle) -> Result<(), String>`：用户在拒绝首次 UAC 后改主意时点击「以管理员身份重启」触发；调度成功后由后端 spawn 一个延迟 200ms 的线程调用 `app.exit(0)`，给前端留出 UI 反馈窗口，避免双开。

@@ -345,32 +345,10 @@ fn request_admin_restart(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // ADMIN_POLICY: 启动时主动请求 UAC 提权（REQUIREMENTS 2 / DESIGN 14.1）
-    // 若用户同意 → 当前进程退出，由提权后的新进程接管；
-    // 若用户拒绝 → 降级启动，首页显示权限受限 + 重启按钮。
-    //
-    // 注意：此处尚在 tauri::Builder 之前，tauri-plugin-log 尚未装配，
-    // log::* 宏会被丢弃 — 用 eprintln! 走 stderr，dev 模式控制台可见。
-    // UAC 弹窗本身就是用户可见的反馈，日志主要服务于事后排查。
-    if !admin::is_admin() {
-        eprintln!("[startup] not elevated, requesting UAC");
-        match admin::restart_as_admin() {
-            Ok(_) => {
-                // UAC 调度成功，新进程已启动，当前进程直接退出
-                eprintln!("[startup] elevated process launched, exiting current process");
-                std::process::exit(0);
-            }
-            Err(e) => {
-                // 用户拒绝 UAC 或调度失败，继续以普通权限启动
-                eprintln!(
-                    "[startup] UAC declined or failed ({}), starting with limited privileges",
-                    e
-                );
-            }
-        }
-    } else {
-        eprintln!("[startup] already elevated");
-    }
+    // ADMIN_POLICY（2026-06-10 调整）：启动时不再主动请求 UAC 提权。
+    // 应用普通权限即可运行：加载驱动、热键监听、按键/鼠标模拟均不需要管理员。
+    // 仅「安装驱动」需要管理员，由 install_interception_driver 命令的权限守卫拦截，
+    // 用户在首页看到 permission_denied 提示后，点击「以管理员身份重启」按钮触发 UAC。
 
     // DESIGN 13.1 启动顺序（阶段 10 当前覆盖 1-2 + 权限检测）：
     //   1. 初始化日志   ← 由 plugin builder 在 setup 之前装配
