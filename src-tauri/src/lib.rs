@@ -153,11 +153,16 @@ fn reboot_system() -> Result<(), String> {
     driver::reboot_system()
 }
 
-/// 设置当前页面 — 阶段 12
+/// 设置当前页面 — 阶段 12 / P2-3 修复
 ///
 /// 后端记录当前页面，用于判断热键是否可触发（REQUIREMENTS 3.6）。
+/// P2-3 修复: Idle 状态下切到 keyboard/mouse 页时自动切换到对应 Ready 状态。
 #[tauri::command]
-fn set_current_page(page: String, state: tauri::State<SharedState>) -> Result<(), String> {
+fn set_current_page(
+    page: String,
+    state: tauri::State<SharedState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     // 运行态守卫 — DESIGN 6.1
     {
         let app_state = state
@@ -174,12 +179,38 @@ fn set_current_page(page: String, state: tauri::State<SharedState>) -> Result<()
         }
     }
 
-    let mut app_state = state
-        .inner()
-        .lock()
-        .map_err(|e| format!("Failed to lock state: {}", e))?;
-    app_state.current_page = page.clone();
-    log::info!("[set_current_page] page changed to: {}", page);
+    let new_status = {
+        let mut app_state = state
+            .inner()
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        app_state.current_page = page.clone();
+
+        // P2-3: Idle 状态下根据页面切换到对应 Ready 状态
+        if app_state.runtime_status == RuntimeStatus::Idle {
+            app_state.runtime_status = match page.as_str() {
+                "keyboard" => RuntimeStatus::ReadyKeyboard,
+                "mouse" => RuntimeStatus::ReadyMouse,
+                _ => RuntimeStatus::Idle,
+            };
+        }
+
+        log::info!(
+            "[set_current_page] page={}, status={:?}",
+            page,
+            app_state.runtime_status
+        );
+        app_state.runtime_status.clone()
+    };
+
+    // 发送 runtime_status_changed 事件
+    if let Err(e) = app.emit(
+        "runtime_status_changed",
+        serde_json::json!({ "status": new_status }),
+    ) {
+        log::error!("[set_current_page] failed to emit event: {}", e);
+    }
+
     Ok(())
 }
 

@@ -135,10 +135,20 @@ pub fn start_hotkey_listener(
                         let is_stop_key = *code as u16 == stop_scan_code;
 
                         if is_start_key || is_stop_key {
+                            // 诊断日志 — 热键匹配成功时记录上下文
+                            info!(
+                                "[hotkeys_interception] hotkey matched: code={}, start_code={}, stop_code={}, page={}, status={:?}",
+                                *code as u16, start_scan_code, stop_scan_code, current_page, runtime_status
+                            );
+
                             // 页面过滤 — REQUIREMENTS 3.6
                             if current_page.as_str() != "keyboard"
                                 && current_page.as_str() != "mouse"
                             {
+                                info!(
+                                    "[hotkeys_interception] hotkey blocked by page filter: current_page={}",
+                                    current_page
+                                );
                                 interception.send(device, &[*stroke]);
                                 continue;
                             }
