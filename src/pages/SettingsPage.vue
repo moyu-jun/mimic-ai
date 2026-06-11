@@ -365,15 +365,23 @@ function drawStaticWave(): void {
   ctx.clearRect(0, 0, w, h)
 
   ctx.strokeStyle = getComputedStyle(canvas).getPropertyValue('--accent').trim() || '#FE7733'
-  ctx.lineWidth = 1
-  ctx.beginPath()
+  ctx.fillStyle = ctx.strokeStyle
+  // 每像素列取该区间样本的绝对峰值，画成关于中线对称的细条（包络风格）
+  const mid = h / 2
+  const half = mid - 2
+  const n = samples.length
   for (let x = 0; x < w; x++) {
-    const i = Math.floor((x / w) * samples.length)
-    const val = samples[i] / 32768
-    const y = h / 2 - val * (h / 2 - 2)
-    x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+    const i0 = Math.floor((x / w) * n)
+    const i1 = Math.max(i0 + 1, Math.floor(((x + 1) / w) * n))
+    let peak = 0
+    for (let i = i0; i < i1; i++) {
+      const v = samples[i]
+      const a = v < 0 ? -v : v
+      if (a > peak) peak = a
+    }
+    const barH = Math.max(1, (peak / 32768) * half)
+    ctx.fillRect(x, mid - barH, 1, barH * 2)
   }
-  ctx.stroke()
 
   // 选区外半透明遮罩
   ctx.fillStyle = 'rgba(0,0,0,0.5)'
