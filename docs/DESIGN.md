@@ -657,11 +657,20 @@ pub fn install_interception_driver() -> Result<(), String> {
 - 权限守卫：非管理员返回 `Err("permission_denied")`。
 - 运行态守卫：模拟运行中（RunningKeyboard / RunningMouse / PickingMouse / Recording）返回 `busy`。
 - 调用 `driver::uninstall_driver()` → 与安装复用同一 `run_installer_windows(action_param)` 实现，仅参数由 `/install` 改为 `/uninstall`（ShellExecuteExW "runas" + WaitForSingleObject 等待退出）。
-- 完成后 `check_interception_driver()` 重检并写回 `state.driver_status`，前端刷新卡片。卸载后通常需重启系统才彻底生效。
+- 命令成功返回即代表已调度卸载。注意：卸载后驱动仍驻留内核（`create_context()` 在重启前可能仍成功 → `check_driver_status` 不可靠），故**不依赖后端状态判断卸载结果**，由前端以命令成功返回作为「已卸载待重启」信号。
 
 `driver.rs` 重构：原 `install_driver_windows()` 提取为参数化的 `run_installer_windows(action_param: &str)`，`install_driver()` / `uninstall_driver()` 分别传入 `/install` 与 `/uninstall`。
 
 **前端交互（HomePage.vue）**：`Ready` / `InstalledNeedReboot` 状态在原安装按钮位置展示红色「卸载驱动」按钮（`InstalledNeedReboot` 时与「重启电脑」并排）。点击「卸载驱动」**先判管理员权限**——未授权直接提示提权、不展开确认区；管理员权限下展开内联文字确认区，须准确输入「卸载驱动」四字方可点「确认卸载」，输入不符按钮禁用。
+
+**安装与卸载行为对齐**：二者均以命令成功返回作为「待重启」信号，不依赖 `check_driver_status`（驱动需重启才加载/卸载，检测在重启前不可靠）。前端用统一标志 `pendingReboot: 'installed' | 'uninstalled' | null` 驱动卡片展示：
+
+- 安装成功 → `pendingReboot = 'installed'`，卡片文字「驱动已安装，需重启电脑」。
+- 卸载成功 → `pendingReboot = 'uninstalled'`，卡片文字「驱动已卸载，需重启电脑」。
+- 两种情况按钮均切换为「重启电脑」（复用 `onReboot`），并显示绿色 `driverMessage` 成功提示引导重启。
+- 安装的权限前置由后端命令入口 `is_admin()` 守卫实现（非管理员返回 `permission_denied`、不触发 UAC），前端 catch 后提示提权，与卸载的前端预判效果一致。
+
+页面滚动：首页 `.home` 与设置页一致采用 `overflow-y: auto` + `scrollbar-gutter: stable`，预留滚动条宽度避免内容增减（如展开卸载确认区）时页面横向抖动；滚动条样式复用各页统一的 `::-webkit-scrollbar` 规则。
 
 ### 12.4 设备选择策略
 

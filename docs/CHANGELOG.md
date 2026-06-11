@@ -1943,3 +1943,71 @@ Interception 同进程多 context 对同一设备的事件分发存在竞争，w
 
 - 实机验证待用户在 Windows 环境完成（DOM 文字校验与 UAC 流程）。
 - 卸载后驱动通常需重启系统才彻底移除，前端依赖 `check_driver_status` 重检后的状态展示，未额外强制提示重启（沿用现有 `InstalledNeedReboot` 的「重启电脑」入口）。
+
+
+---
+
+## 阶段 18.4：首页滚动条 + 卸载成功反馈
+
+**完成时间**：2026-06-11
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 改 | `.home` 由 `overflow: hidden` 改为 `overflow-y: auto` + `scrollbar-gutter: stable`，并补 `::-webkit-scrollbar` 样式（同设置页）；新增 `uninstalledNeedReboot` / `driverMessage` 状态；卸载成功后卡片转「已卸载待重启」、按钮切「重启电脑」、显示绿色成功提示 |
+
+### 关键决策
+
+- **预留滚动条宽度**：用 `scrollbar-gutter: stable` 而非仅 `overflow-y: auto`，保证无滚动条 ↔ 有滚动条切换（如展开卸载确认区）时页面宽度不抖动，符合用户对「无滚动条时也预留宽度」的要求。
+- **卸载结果以命令返回为准，不依赖 `check_driver_status`**：卸载后驱动仍驻留内核，`create_context()` 在重启前可能仍成功 → 状态检测不可靠。故移除卸载后的 `check_driver_status` 调用，改为命令成功返回即置 `uninstalledNeedReboot` 标志，明确引导重启。
+- **按钮复用「重启电脑」**：卸载成功后驱动卡片只保留「重启电脑」按钮（复用 `onReboot`），文字提示「驱动已卸载，需重启电脑」，与 `InstalledNeedReboot` 的重启入口一致，避免新增冗余命令。
+
+### 验证结果
+
+- `vue-tsc --noEmit` — 通过，无 TS/Vue 错误。
+- 纯前端改动，未触碰后端；卸载/重启实机流程待用户在 Windows 环境验证。
+
+### 文档回写
+
+- REQUIREMENTS § 3.11：补充卸载成功反馈与「卸载按钮切换为重启电脑」行为。
+- DESIGN § 12.3.1：补充「卸载结果不依赖后端状态、由前端 `uninstalledNeedReboot` 标志驱动」及首页滚动条 `scrollbar-gutter: stable` 说明。
+
+### 偏差与遗留
+
+- 阶段 18.3 遗留的「依赖 `check_driver_status` 重检」做法在本阶段被修正（改为命令成功即视为已卸载待重启），原因见上「关键决策」。
+- 实机验证（卸载成功提示、按钮切换、重启）待用户在 Windows 环境完成。
+
+
+---
+
+## 阶段 18.5：安装行为与卸载对齐
+
+**完成时间**：2026-06-11
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 改 | `uninstalledNeedReboot` 布尔升级为统一标志 `pendingReboot: 'installed' \| 'uninstalled' \| null`；`onInstallDriver` 移除安装后 `check_driver_status`，改为命令成功即置 `pendingReboot='installed'` + 绿色提示，按钮切「重启电脑」 |
+
+### 关键决策
+
+- **安装与卸载统一为「命令成功即待重启」**：与阶段 18.4 卸载同理——驱动需重启才加载，重启前 `check_driver_status` 不可靠，故安装也不再依赖状态检测，以命令成功返回作为「已安装待重启」信号。
+- **单一标志替代并行布尔**：用 `pendingReboot` 三态枚举同时表达安装/卸载两种待重启场景，卡片文字与按钮逻辑收敛到一处，避免再增一个 `installedNeedReboot` 布尔。
+- **安装权限前置不改动**：安装的权限校验已由后端命令入口 `is_admin()` 守卫实现（非管理员返回 `permission_denied`、不触发 UAC），前端 catch 提示提权，效果与卸载的前端预判一致，无需新增前端预判。
+
+### 验证结果
+
+- `vue-tsc --noEmit` — 通过，无 TS/Vue 错误。
+- 纯前端改动，未触碰后端；安装/重启实机流程待用户在 Windows 环境验证。
+
+### 文档回写
+
+- REQUIREMENTS § 3.11：安装条目补充权限前置 + 「命令成功即待重启」+ 按钮切换为「重启电脑」。
+- DESIGN § 12.3.1：新增「安装与卸载行为对齐」小节，说明统一 `pendingReboot` 标志与安装权限前置。
+
+### 偏差与遗留
+
+- 阶段 18.4 引入的 `uninstalledNeedReboot` 布尔在本阶段被 `pendingReboot` 取代（同一前端标志的演进，非历史回改）。
+- 实机验证（非管理员安装提示、管理员安装成功反馈与按钮切换）待用户在 Windows 环境完成。

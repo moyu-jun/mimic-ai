@@ -35,6 +35,10 @@ const isRebooting = ref(false)
 const showUninstallConfirm = ref(false)
 const uninstallConfirmText = ref('')
 const isUninstalling = ref(false)
+// 安装 / 卸载成功后置位：驱动卡片进入「待重启」展示，按钮变「重启电脑」。
+// 'installed' = 安装成功待重启；'uninstalled' = 卸载成功待重启。
+const pendingReboot = ref<'installed' | 'uninstalled' | null>(null)
+const driverMessage = ref<string | null>(null)
 const UNINSTALL_PHRASE = '卸载驱动'
 
 async function onRestartAsAdmin(): Promise<void> {
@@ -57,11 +61,13 @@ async function onInstallDriver(): Promise<void> {
   if (isInstalling.value) return
   isInstalling.value = true
   installError.value = null
+  driverMessage.value = null
   try {
     await invoke('install_interception_driver')
-    // 安装器已启动，重新检测驱动状态
-    const status = await invoke<string>('check_driver_status')
-    driverStatus.value = JSON.parse(status) as DriverStatus
+    // 安装已执行：驱动文件与注册表服务项已写入，但驱动需重启系统才会加载。
+    // 与卸载对称——以命令成功返回作为「已安装待重启」信号，不依赖 check_driver_status。
+    pendingReboot.value = 'installed'
+    driverMessage.value = '驱动已安装，需重启电脑后才会加载。'
   } catch (err) {
     const errStr = String(err)
     installError.value = errStr.includes('permission_denied')
@@ -100,6 +106,7 @@ async function onReboot(): Promise<void> {
 /** 点击「卸载驱动」：先判管理员权限，再展开文字确认区（防误触） */
 function onUninstallClick(): void {
   installError.value = null
+  driverMessage.value = null
   // 权限判断前置——非管理员直接提示提权，不展开输入框
   if (!isAdmin.value) {
     installError.value = '权限不足，请点击上方「以管理员身份重启」按钮'
@@ -115,7 +122,7 @@ function cancelUninstall(): void {
   installError.value = null
 }
 
-/** 确认卸载：校验文字 → 调后端卸载 → 刷新状态 */
+/** 确认卸载：校验文字 → 调后端卸载 → 进入「已卸载待重启」 */
 async function onConfirmUninstall(): Promise<void> {
   if (isUninstalling.value) return
   if (uninstallConfirmText.value.trim() !== UNINSTALL_PHRASE) {
@@ -126,9 +133,12 @@ async function onConfirmUninstall(): Promise<void> {
   installError.value = null
   try {
     await invoke('uninstall_interception_driver')
-    const status = await invoke<string>('check_driver_status')
-    driverStatus.value = JSON.parse(status) as DriverStatus
+    // 卸载已执行：注册表服务项已移除，但驱动仍驻留内核，必须重启系统才彻底卸载。
+    // check_driver_status 在重启前可能仍返回 Ready（context 尚可创建），不可靠，
+    // 故以命令成功返回作为「已卸载待重启」信号，引导用户重启。
     cancelUninstall()
+    pendingReboot.value = 'uninstalled'
+    driverMessage.value = '驱动已卸载，需重启电脑后彻底生效。'
   } catch (err) {
     const errStr = String(err)
     installError.value = errStr.includes('permission_denied')
@@ -200,20 +210,32 @@ onMounted(async () => {
         <span
           class="driver-dot"
           :class="{
-            'dot-ready': driverStatus === 'Ready',
-            'dot-warn': driverStatus === 'InstalledNeedReboot',
+            'dot-ready': driverStatus === 'Ready' && !pendingReboot,
+            'dot-warn': driverStatus === 'InstalledNeedReboot' || pendingReboot !== null,
             'dot-error': driverStatus === 'Error',
           }"
         ></span>
         <span class="driver-text">
-          {{ driverStatus === 'Ready' ? 'Interception 驱动已加载'
+          {{ pendingReboot === 'installed' ? '驱动已安装，需重启电脑'
+           : pendingReboot === 'uninstalled' ? '驱动已卸载，需重启电脑'
+           : driverStatus === 'Ready' ? 'Interception 驱动已加载'
            : driverStatus === 'InstalledNeedReboot' ? '驱动已安装，需重启系统'
            : driverStatus === 'Error' ? '驱动错误'
            : '驱动未安装' }}
         </span>
       </div>
+      <!-- 安装 / 卸载成功后：仅显示「重启电脑」 -->
       <button
-        v-if="driverStatus === 'NotInstalled'"
+        v-if="pendingReboot"
+        type="button"
+        class="install-btn reboot-btn"
+        :disabled="isRebooting"
+        @click="onReboot"
+      >
+        {{ isRebooting ? '正在重启...' : '重启电脑' }}
+      </button>
+      <button
+        v-else-if="driverStatus === 'NotInstalled'"
         type="button"
         class="install-btn"
         :disabled="isInstalling"
@@ -276,6 +298,7 @@ onMounted(async () => {
       </div>
     </div>
     <p v-if="installError" class="install-error">{{ installError }}</p>
+    <p v-if="driverMessage" class="driver-message">{{ driverMessage }}</p>
 
     <!-- 当前热键概览 -->
     <div class="card hotkey-card">
@@ -301,7 +324,27 @@ onMounted(async () => {
   gap: 12px;
   height: 100%;
   padding: 16px 18px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 滚动条样式 — 同 SettingsPage / KeyboardPage / MousePage */
+.home::-webkit-scrollbar {
+  width: 8px;
+}
+
+.home::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.home::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+
+.home::-webkit-scrollbar-thumb:hover {
+  background: var(--text-disabled);
 }
 
 .hero {
@@ -445,6 +488,12 @@ onMounted(async () => {
   margin: -4px 0 0;
   font-size: 11px;
   color: var(--danger);
+}
+
+.driver-message {
+  margin: -4px 0 0;
+  font-size: 11px;
+  color: var(--success);
 }
 
 .driver-text {
