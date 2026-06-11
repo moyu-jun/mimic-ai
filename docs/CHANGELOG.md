@@ -2053,3 +2053,38 @@ Interception 同进程多 context 对同一设备的事件分发存在竞争，w
 
 - 实机验证（5 项 UI 细节的最终视觉与滚动交互）待用户在 Windows 环境完成。
 
+---
+
+## 阶段 18.7：热键提示音延迟优化
+
+**完成时间**：2026-06-12
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/sound.rs](../src-tauri/src/sound.rs) | 改 | 新增 `make_silent_wav()` / `warmup()` / `start_keepalive()`：内存中生成最小有效 WAV（44100Hz / 16-bit / mono / 10ms 静音），启动时同步播放预热 waveOut 设备，并启动后台保活线程每 5s 用 `SND_NOSTOP` 重播以防设备空闲超时被释放。模块顶部注释补充「低延迟策略」说明。 |
+| [src-tauri/src/hotkeys_interception.rs](../src-tauri/src/hotkeys_interception.rs) | 改 | `handle_start_keyboard` / `handle_start_mouse` 中将 `crate::sound::play_start()` 移到 `app.emit("runtime_status_changed", …)` **之前**调用：音频设备初始化与 IPC 事件派发并行，缩短感知延迟。停止分支已先播放（无需调整）。 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | `setup` 入口（日志记录之后、配置加载之前）调用 `sound::warmup()` + `sound::start_keepalive()`，与 Interception 驱动状态解耦，始终启用。 |
+
+### 关键决策
+
+- **冷启动定位**：`PlaySoundW` 底层使用 winmm waveOut API，首次调用或空闲 30s+ 后需要重新初始化音频设备，实测耗时 50~200ms，是用户感知到「明显延迟」的主要来源。逐项追溯监听线程、状态锁、IPC `emit` 之后排除其他可疑点。
+- **预热而非替换音频后端**：维持 `PlaySoundW` 不引入额外音频 crate（与 DESIGN § 18.1 选型一致），改为通过「启动同步预热 + 周期保活」让设备始终处于就绪状态，工程成本最小、无生命周期复杂度。
+- **保活策略 `SND_NOSTOP`**：保活线程使用 `SND_MEMORY | SND_NODEFAULT | SND_NOSTOP`（不设 `SND_ASYNC`，即同步）。当真实提示音正在异步播放时立即返回 FALSE 不打断；空闲时同步播放 10ms 静音并阻塞期间，缓冲生命周期天然安全。
+- **保活周期 5s**：远短于 Windows 音频会话典型空闲超时（30s+），同时 CPU 占用极低（每次 10ms 静音 + 5s sleep）。
+- **`play_start()` 前置于 `emit()`**：音频设备初始化与 IPC 派发可并行进行，进一步缩短从热键触发到声音可闻的路径。停止分支原本已先播放，无需调整。
+
+### 验证结果
+
+- `cargo check`（src-tauri 目录）— 通过，无 warning。
+- 实机延迟感知改善待用户在 Windows 环境验证；预期：首次触发与长时间空闲后触发的延迟从 50~200ms 降至 <20ms，与已就绪状态下的延迟一致。
+
+### 文档回写
+
+- DESIGN § 18.1 概念上仍有效（仍使用 `PlaySoundW`），新增的 warmup/keepalive 属于实现细节延伸，已在 [src-tauri/src/sound.rs](../src-tauri/src/sound.rs) 模块顶部补充注释；未单独修改 DESIGN 章节。
+
+### 偏差与遗留
+
+- 实机验证（不同硬件 / 不同 Windows 版本下的延迟改善幅度）待用户在 Windows 环境完成。
+

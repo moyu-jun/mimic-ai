@@ -540,6 +540,12 @@ pub fn run() {
                 env!("CARGO_PKG_VERSION")
             );
 
+            // 音频设备预热 + 保活 — 消除 PlaySoundW 冷启动延迟
+            // 启动时同步播放 10ms 静音初始化 waveOut 设备；后台线程每 5s 重播保活。
+            // 与 Interception 驱动状态无关，始终启用。
+            sound::warmup();
+            sound::start_keepalive();
+
             // 配置加载（路径 + 结果均记录日志）
             match config::config_path() {
                 Ok(p) => log::info!("[setup] config path: {}", p.display()),

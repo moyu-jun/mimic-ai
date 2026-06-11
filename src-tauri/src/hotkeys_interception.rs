@@ -336,14 +336,15 @@ fn handle_start_keyboard(app: &AppHandle, state: &SharedState) {
         (selected, app_state.action_tx.clone(), app_state.stop_flag.clone())
     };
 
-    if let Err(e) = app.emit("runtime_status_changed", serde_json::json!({ "status": new_status })) {
-        error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
-    }
-
     // 启动提示音 — 仅在确实有勾选动作（真正进入循环）时播放；
+    // 尽早调用（emit 之前），使音频设备初始化与 IPC 事件派发并行，降低感知延迟。
     // 空列表会在下方 worker 线程内立即回退 Idle，不算启动生效，不播放。
     if !selected_actions.is_empty() {
         crate::sound::play_start();
+    }
+
+    if let Err(e) = app.emit("runtime_status_changed", serde_json::json!({ "status": new_status })) {
+        error!("[hotkeys_interception] failed to emit runtime_status_changed: {}", e);
     }
 
     let app_clone = app.clone();
@@ -440,6 +441,10 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
         (app_state.mouse_tx.clone(), app_state.stop_flag.clone())
     };
 
+    // 启动提示音 — 已确认有有效坐标，真正进入鼠标模拟循环。
+    // 尽早调用（emit 之前），使音频设备初始化与 IPC 事件派发并行，降低感知延迟。
+    crate::sound::play_start();
+
     if let Err(e) = app.emit(
         "runtime_status_changed",
         serde_json::json!({ "status": new_status }),
@@ -449,9 +454,6 @@ fn handle_start_mouse(app: &AppHandle, state: &SharedState) {
             e
         );
     }
-
-    // 启动提示音 — 已确认有有效坐标，真正进入鼠标模拟循环
-    crate::sound::play_start();
 
     std::thread::spawn(move || {
         info!(
