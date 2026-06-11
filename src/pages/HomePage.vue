@@ -31,6 +31,12 @@ const isInstalling = ref(false)
 const installError = ref<string | null>(null)
 const isRebooting = ref(false)
 
+// 卸载驱动：内联文字确认，防止误触
+const showUninstallConfirm = ref(false)
+const uninstallConfirmText = ref('')
+const isUninstalling = ref(false)
+const UNINSTALL_PHRASE = '卸载驱动'
+
 async function onRestartAsAdmin(): Promise<void> {
   if (isRestarting.value) return
   isRestarting.value = true
@@ -88,6 +94,55 @@ async function onReboot(): Promise<void> {
       ? '权限不足，请点击上方「以管理员身份重启」按钮'
       : '重启失败，请手动重启电脑'
     log_error('[HomePage] reboot failed:', err)
+  }
+}
+
+/** 点击「卸载驱动」：先判管理员权限，再展开文字确认区（防误触） */
+function onUninstallClick(): void {
+  installError.value = null
+  // 权限判断前置——非管理员直接提示提权，不展开输入框
+  if (!isAdmin.value) {
+    installError.value = '权限不足，请点击上方「以管理员身份重启」按钮'
+    return
+  }
+  showUninstallConfirm.value = true
+}
+
+/** 取消卸载，收起确认区并清空输入 */
+function cancelUninstall(): void {
+  showUninstallConfirm.value = false
+  uninstallConfirmText.value = ''
+  installError.value = null
+}
+
+/** 确认卸载：校验文字 → 调后端卸载 → 刷新状态 */
+async function onConfirmUninstall(): Promise<void> {
+  if (isUninstalling.value) return
+  if (uninstallConfirmText.value.trim() !== UNINSTALL_PHRASE) {
+    installError.value = `请在输入框中准确输入「${UNINSTALL_PHRASE}」以确认`
+    return
+  }
+  isUninstalling.value = true
+  installError.value = null
+  try {
+    await invoke('uninstall_interception_driver')
+    const status = await invoke<string>('check_driver_status')
+    driverStatus.value = JSON.parse(status) as DriverStatus
+    cancelUninstall()
+  } catch (err) {
+    const errStr = String(err)
+    installError.value = errStr.includes('permission_denied')
+      ? '权限不足，请点击上方「以管理员身份重启」按钮'
+      : errStr.includes('declined')
+        ? '已取消卸载'
+        : errStr.includes('busy')
+          ? '模拟运行中，请先停止后再卸载'
+          : errStr.includes('not found')
+            ? '安装程序不存在，请检查 drivers 目录'
+            : '卸载失败，请稍后重试'
+    log_error('[HomePage] uninstall driver failed:', err)
+  } finally {
+    isUninstalling.value = false
   }
 }
 
@@ -166,15 +221,59 @@ onMounted(async () => {
       >
         {{ isInstalling ? '正在安装...' : '安装驱动' }}
       </button>
-      <button
-        v-else-if="driverStatus === 'InstalledNeedReboot'"
-        type="button"
-        class="install-btn reboot-btn"
-        :disabled="isRebooting"
-        @click="onReboot"
-      >
-        {{ isRebooting ? '正在重启...' : '重启电脑' }}
-      </button>
+      <div v-else-if="driverStatus === 'Ready' || driverStatus === 'InstalledNeedReboot'" class="driver-actions">
+        <button
+          v-if="driverStatus === 'InstalledNeedReboot'"
+          type="button"
+          class="install-btn reboot-btn"
+          :disabled="isRebooting"
+          @click="onReboot"
+        >
+          {{ isRebooting ? '正在重启...' : '重启电脑' }}
+        </button>
+        <button
+          type="button"
+          class="install-btn uninstall-btn"
+          :disabled="isUninstalling || showUninstallConfirm"
+          @click="onUninstallClick"
+        >
+          卸载驱动
+        </button>
+      </div>
+    </div>
+
+    <!-- 卸载二次确认（内联展开，防误触）— 仅管理员且点击卸载后出现 -->
+    <div v-if="showUninstallConfirm" class="uninstall-confirm card">
+      <p class="uninstall-warn">
+        ⚠ 卸载 Interception 驱动是<b>高风险操作</b>，将移除按键与鼠标模拟能力，且通常需要重启系统才能彻底生效。请谨慎确认。
+      </p>
+      <p class="uninstall-hint">如确需卸载，请在下方输入框输入「{{ UNINSTALL_PHRASE }}」后点击「确认卸载」。</p>
+      <input
+        v-model="uninstallConfirmText"
+        type="text"
+        class="uninstall-input"
+        :placeholder="`输入 ${UNINSTALL_PHRASE} 以确认`"
+        :disabled="isUninstalling"
+        @keyup.enter="onConfirmUninstall"
+      />
+      <div class="uninstall-confirm-actions">
+        <button
+          type="button"
+          class="install-btn"
+          :disabled="isUninstalling"
+          @click="cancelUninstall"
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          class="install-btn uninstall-btn"
+          :disabled="isUninstalling || uninstallConfirmText.trim() !== UNINSTALL_PHRASE"
+          @click="onConfirmUninstall"
+        >
+          {{ isUninstalling ? '正在卸载...' : '确认卸载' }}
+        </button>
+      </div>
     </div>
     <p v-if="installError" class="install-error">{{ installError }}</p>
 
@@ -392,6 +491,68 @@ onMounted(async () => {
 
 .install-btn.reboot-btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--warning) 85%, white);
+}
+
+/* 卸载驱动按钮 — 鲜明红色警告色 */
+.driver-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.install-btn.uninstall-btn {
+  background: var(--danger);
+  color: var(--color-paper-white);
+}
+
+.install-btn.uninstall-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 85%, black);
+}
+
+/* 卸载二次确认区 — 内联展开 */
+.uninstall-confirm {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--border-subtle));
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-secondary));
+}
+
+.uninstall-warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--danger);
+}
+
+.uninstall-warn b {
+  font-weight: 700;
+}
+
+.uninstall-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.uninstall-input {
+  padding: 6px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.uninstall-input:focus {
+  outline: none;
+  border-color: var(--danger);
+}
+
+.uninstall-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 /* 热键概览 */

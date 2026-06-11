@@ -144,6 +144,46 @@ fn install_interception_driver(state: tauri::State<SharedState>) -> Result<(), S
     Ok(())
 }
 
+/// 卸载 Interception 驱动 — 与 install_interception_driver 对称
+///
+/// 以管理员身份调用安装器 `/uninstall`。卸载后通常需重启系统才彻底移除。
+/// 前置条件：必须以管理员权限运行（否则返回 `permission_denied`）。
+#[tauri::command]
+fn uninstall_interception_driver(state: tauri::State<SharedState>) -> Result<(), String> {
+    // 权限守卫 — 与安装一致，非管理员拒绝
+    if !admin::is_admin() {
+        log::warn!("[uninstall_driver] rejected: not running as admin");
+        return Err("permission_denied".to_string());
+    }
+
+    // 运行态守卫 — 模拟运行中不允许卸载
+    {
+        let app_state = state
+            .inner()
+            .lock()
+            .map_err(|e| format!("Failed to lock state: {}", e))?;
+        match app_state.runtime_status {
+            RuntimeStatus::RunningKeyboard
+            | RuntimeStatus::RunningMouse
+            | RuntimeStatus::PickingMouse
+            | RuntimeStatus::Recording => {
+                return Err("busy: simulation running".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    driver::uninstall_driver()?;
+
+    // 卸载后重新检测并更新 state
+    let new_status = driver::check_interception_driver();
+    if let Ok(mut app_state) = state.inner().lock() {
+        app_state.driver_status = new_status;
+    }
+
+    Ok(())
+}
+
 /// 重启系统 — 驱动安装后需重启加载（阶段 11 优化）
 ///
 /// 需管理员权限；非管理员返回 `permission_denied`。
@@ -619,6 +659,7 @@ pub fn run() {
             request_admin_restart,
             check_driver_status,
             install_interception_driver,
+            uninstall_interception_driver,
             reboot_system,
             set_current_page,
             update_hotkeys,

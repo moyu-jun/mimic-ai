@@ -36,11 +36,26 @@ pub fn check_interception_driver() -> DriverStatus {
 pub fn install_driver() -> Result<(), String> {
     #[cfg(windows)]
     {
-        install_driver_windows()
+        run_installer_windows("/install")
     }
     #[cfg(not(windows))]
     {
         Err("Driver installation is only supported on Windows".to_string())
+    }
+}
+
+/// 执行驱动卸载（需管理员权限）
+///
+/// 与 install_driver() 对称：以管理员身份调用同一安装器的 `/uninstall` 参数。
+/// 卸载后通常需重启系统才彻底移除，调用者应重新 check_interception_driver()。
+pub fn uninstall_driver() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        run_installer_windows("/uninstall")
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Driver uninstallation is only supported on Windows".to_string())
     }
 }
 
@@ -93,7 +108,7 @@ fn check_driver_windows() -> DriverStatus {
 }
 
 #[cfg(windows)]
-fn install_driver_windows() -> Result<(), String> {
+fn run_installer_windows(action_param: &str) -> Result<(), String> {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
     use windows_sys::Win32::UI::Shell::{
@@ -121,10 +136,10 @@ fn install_driver_windows() -> Result<(), String> {
 
     let verb = encode_wide("runas");
     let file = encode_wide(&installer_path.to_string_lossy());
-    let params = encode_wide("/install");
+    let params = encode_wide(action_param);
 
     // 用 ShellExecuteExW 而非 ShellExecuteW：
-    // 后者是「启动即返回」，安装器还没写完注册表我们就检测 → 永远是 NotInstalled。
+    // 后者是「启动即返回」，安装器还没写完注册表我们就检测 → 状态误判。
     // SEE_MASK_NOCLOSEPROCESS 让 hProcess 填入安装器进程句柄，
     // 配合 WaitForSingleObject 等其真正退出后再返回，确保后续检测拿到正确状态。
     let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
@@ -139,7 +154,7 @@ fn install_driver_windows() -> Result<(), String> {
     if ok == 0 {
         // 调度失败（用户拒绝 UAC 时 GetLastError == ERROR_CANCELLED 1223）
         let err_msg = "ShellExecuteExW failed (user may have declined UAC)".to_string();
-        log::error!("[driver] {}", err_msg);
+        log::error!("[driver] {} (param={})", err_msg, action_param);
         return Err(err_msg);
     }
 
@@ -150,12 +165,12 @@ fn install_driver_windows() -> Result<(), String> {
     }
 
     // 阻塞等待安装器进程退出（INFINITE）。该命令在独立线程中执行，
-    // 不会卡住 Tauri 主线程；前端通过 isInstalling 显示「正在安装...」。
+    // 不会卡住 Tauri 主线程；前端通过 isInstalling/isUninstalling 显示进度。
     let wait = unsafe { WaitForSingleObject(sei.hProcess, INFINITE) };
     unsafe { CloseHandle(sei.hProcess) };
 
     if wait == WAIT_OBJECT_0 {
-        log::info!("[driver] installer process exited, installation complete");
+        log::info!("[driver] installer process exited (param={})", action_param);
         Ok(())
     } else {
         let err_msg = format!("WaitForSingleObject returned unexpected code {}", wait);

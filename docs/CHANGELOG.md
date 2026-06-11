@@ -1904,3 +1904,42 @@ Interception 同进程多 context 对同一设备的事件分发存在竞争，w
 ### 偏差与遗留
 
 - § 6「待确认事项」节在重写中并入正文（坐标拾取全屏可用性已确认，驱动外置目录已实现），文档不再保留独立的待确认章节。
+
+
+---
+
+## 阶段 18.3：驱动卸载入口
+
+**完成时间**：2026-06-11
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src-tauri/src/driver.rs](../src-tauri/src/driver.rs) | 改 | `install_driver_windows()` 重构为参数化 `run_installer_windows(action_param)`；新增 `uninstall_driver()`（`/uninstall`），`install_driver()` 改调 `run_installer_windows("/install")` |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | 新增 `uninstall_interception_driver` 命令（权限 + 运行态守卫，对称于安装），并在 `invoke_handler` 注册 |
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 改 | 新增卸载状态与三个交互函数；`Ready`/`InstalledNeedReboot` 展示红色卸载按钮；内联文字二次确认区 |
+
+### 关键决策
+
+- **复用安装器逻辑**：卸载与安装共用 `run_installer_windows`，仅 `/install` ↔ `/uninstall` 参数不同，避免重复 ShellExecuteExW + WaitForSingleObject 样板代码。
+- **权限判断前置于确认框**：`onUninstallClick` 先判 `isAdmin`，未授权直接走提权提示、不展开输入框；仅管理员权限下才出现文字确认区，符合需求「提醒在确认框出现前」。
+- **内联确认而非模态框**：在驱动卡片下方内联展开警告说明 + 输入框，须准确输入「卸载驱动」四字，`确认卸载` 按钮在文字不符时禁用，更轻量且契合现有 UI。
+- **卸载入口覆盖两态**：`Ready` 与 `InstalledNeedReboot` 均显示卸载按钮（后者与「重启电脑」并排），覆盖「安装成功」的两种状态。
+
+### 验证结果
+
+- `cargo check` — 通过，无 warning。
+- `vue-tsc --noEmit` — 通过，无 TS/Vue 错误。
+- 实机三项（管理员卸载流程 / 非管理员仅提权 / 错误文字禁用）待用户验证。
+
+### 文档回写
+
+- REQUIREMENTS § 3.11：新增卸载入口、文字二次确认、权限前置规则；§ 2.x 卡片概览补「卸载驱动」按钮；权限说明改为「安装与卸载」均需管理员。
+- DESIGN：新增 § 12.3.1 驱动卸载（对称命令 + `run_installer_windows` 重构 + 前端交互）。
+- TASKS：新增「阶段 18.3：驱动卸载入口」并标记完成；待确认事项 #4 标记为已确认（`/install` 安装、`/uninstall` 卸载）。
+
+### 偏差与遗留
+
+- 实机验证待用户在 Windows 环境完成（DOM 文字校验与 UAC 流程）。
+- 卸载后驱动通常需重启系统才彻底移除，前端依赖 `check_driver_status` 重检后的状态展示，未额外强制提示重启（沿用现有 `InstalledNeedReboot` 的「重启电脑」入口）。

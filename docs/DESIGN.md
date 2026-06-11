@@ -650,6 +650,19 @@ pub fn install_interception_driver() -> Result<(), String> {
 }
 ```
 
+### 12.3.1 驱动卸载（与安装对称）
+
+入口命令 `uninstall_interception_driver`，结构与 `install_interception_driver` 完全对称：
+
+- 权限守卫：非管理员返回 `Err("permission_denied")`。
+- 运行态守卫：模拟运行中（RunningKeyboard / RunningMouse / PickingMouse / Recording）返回 `busy`。
+- 调用 `driver::uninstall_driver()` → 与安装复用同一 `run_installer_windows(action_param)` 实现，仅参数由 `/install` 改为 `/uninstall`（ShellExecuteExW "runas" + WaitForSingleObject 等待退出）。
+- 完成后 `check_interception_driver()` 重检并写回 `state.driver_status`，前端刷新卡片。卸载后通常需重启系统才彻底生效。
+
+`driver.rs` 重构：原 `install_driver_windows()` 提取为参数化的 `run_installer_windows(action_param: &str)`，`install_driver()` / `uninstall_driver()` 分别传入 `/install` 与 `/uninstall`。
+
+**前端交互（HomePage.vue）**：`Ready` / `InstalledNeedReboot` 状态在原安装按钮位置展示红色「卸载驱动」按钮（`InstalledNeedReboot` 时与「重启电脑」并排）。点击「卸载驱动」**先判管理员权限**——未授权直接提示提权、不展开确认区；管理员权限下展开内联文字确认区，须准确输入「卸载驱动」四字方可点「确认卸载」，输入不符按钮禁用。
+
 ### 12.4 设备选择策略
 
 Interception 需要选择键盘/鼠标设备，但不能依赖用户先按任意键。

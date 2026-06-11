@@ -498,6 +498,25 @@
 
 ---
 
+### 阶段 18.3：驱动卸载入口 ✅
+
+**目标**：驱动安装成功（`Ready` / `InstalledNeedReboot`）时，首页提供红色「卸载驱动」入口，带文字二次确认防误触，权限判断前置于确认框。
+
+**任务**：
+
+1. **后端** — `driver.rs` 将 `install_driver_windows()` 重构为参数化 `run_installer_windows(action_param)`，新增 `uninstall_driver()`（传 `/uninstall`）；`lib.rs` 新增 `uninstall_interception_driver` 命令（权限 + 运行态守卫，对称于安装），并在 `invoke_handler` 注册。
+2. **前端** — `HomePage.vue` 新增卸载状态与 `onUninstallClick`/`cancelUninstall`/`onConfirmUninstall`；`Ready`/`InstalledNeedReboot` 展示红色卸载按钮；点击先判管理员权限（未授权提示提权、不展开），管理员下展开内联文字确认区（输入「卸载驱动」校验）。
+
+**验收清单**：
+
+- [x] `cargo check` 通过。
+- [x] `vue-tsc --noEmit` 通过。
+- [ ] 实机：管理员权限下点卸载 → 出现确认框 → 输入「卸载驱动」→ 确认卸载成功刷新状态（⏳ 待实机）。
+- [ ] 实机：非管理员点卸载 → 仅提示提权、不出现确认框（⏳ 待实机）。
+- [ ] 实机：输入错误文字 → 确认按钮禁用 / 提示（⏳ 待实机）。
+
+---
+
 ## 待确认事项跟踪
 
 | # | 事项 | 状态 | 触发动作 |
@@ -505,6 +524,6 @@
 | 1 | 管理员权限策略 | 已定稿：降级启动（DESIGN 14.1 / REQUIREMENTS 2） | — |
 | 2 | 支持键位范围 | 已定稿：不含方向键、不含组合键 | — |
 | 3 | 持久化写盘时机 | 已定稿：列表即时、数字提交时写 | — |
-| 4 | 驱动外置目录文件与安装命令 | 待确认 | 用户放入驱动文件后填入阶段 11 |
+| 4 | 驱动外置目录文件与安装命令 | 已确认：`install-interception.exe /install` 安装、`/uninstall` 卸载 | — |
 | 5 | 坐标拾取在游戏 / 全屏场景可用性 | 待实机验证（阶段 16） | 不可用则替换 `mouse_picker` 内部实现，接口不变 |
 | 6 | 透明圆角窗口实机效果 | 待实机验证（阶段 16） | 必要时回退为 WebView2 / DWM 调整 |
