@@ -439,8 +439,8 @@ async function onSaveTrim(): Promise<void> {
   try {
     await invoke('save_trimmed_audio', {
       target: panelTarget.value,
-      startMs: trimStart.value,
-      endMs: trimEnd.value,
+      startMs: Math.round(trimStart.value),
+      endMs: Math.round(trimEnd.value),
     })
     closePanel()
     await refreshSoundStatus()
