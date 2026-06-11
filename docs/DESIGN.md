@@ -49,10 +49,13 @@ mimic-ai/
 │   │   └── mouse_picker.rs       # 鼠标坐标拾取
 │   ├── Cargo.toml
 │   └── tauri.conf.json           # Tauri 配置
-└── drivers/
-    └── interception/             # 驱动安装文件外置目录（直接入仓库）
-        ├── install-interception.exe
-        └── interception.dll
+└── extra/                        # 外置资源目录（直接入仓库）
+    ├── interception.dll          # 应用运行依赖的 DLL（exe 同级）
+    ├── audio/                    # 提示音文件
+    │   ├── 按键开启.wav
+    │   └── 按键关闭.wav
+    └── driver/                   # 驱动安装文件
+        └── install-interception.exe
 ```
 
 ## 3. Tauri 配置关键点
@@ -615,13 +618,29 @@ pub fn check_interception_driver() -> DriverStatus {
 }
 ```
 
-### 12.3 驱动安装（更新：runas 静默调用）
+### 12.3 驱动安装与 DLL 部署（更新：2026-06-12）
+
+**外置资源目录结构**（`extra/` 直接入仓库）：
+```text
+extra/
+├── interception.dll          # 应用运行依赖的 DLL
+├── audio/                    # 提示音文件
+│   ├── 按键开启.wav
+│   └── 按键关闭.wav
+└── driver/                   # 驱动安装文件
+    └── install-interception.exe
+```
+
+**部署策略**（对应 DLL 加载路径问题修复）：
+
+- `interception.dll` 必须位于 **exe 同级目录**，这样 Windows 加载器在进程启动时能通过"应用程序所在目录"这条最高优先级搜索路径找到它。
+- `build.rs` 在编译时自动将 `extra/` 目录的所有内容递归复制到 `target/{debug,release}/`，保留子目录结构：
+  - `extra/interception.dll` → `target/{profile}/interception.dll`（exe 同级）
+  - `extra/driver/install-interception.exe` → `target/{profile}/driver/install-interception.exe`
+  - `extra/audio/*.wav` → `target/{profile}/audio/*.wav`
+- 不再使用 `SetDllDirectoryW` 设置子目录搜索路径（已从 `lib.rs` 移除），依赖 Windows 标准 DLL 搜索顺序。
 
 **安装流程**（对应反馈 Q2/Q3）：
-
-外置目录：`<exe_dir>/driver/`，包含以下文件（直接入仓库）：
-- `install-interception.exe`（官方安装器）
-- `interception.dll`（驱动库文件）
 
 ```rust
 pub fn install_interception_driver() -> Result<(), String> {

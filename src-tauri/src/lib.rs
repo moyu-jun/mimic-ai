@@ -489,27 +489,10 @@ pub fn run() {
     // 仅「安装驱动」需要管理员，由 install_interception_driver 命令的权限守卫拦截，
     // 用户在首页看到 permission_denied 提示后，点击「以管理员身份重启」按钮触发 UAC。
 
-    // Windows DLL 搜索路径设置：将 driver/ 目录添加到搜索路径，以便加载 interception.dll
-    #[cfg(windows)]
-    {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                let driver_dir = exe_dir.join("driver");
-                if driver_dir.exists() {
-                    use std::os::windows::ffi::OsStrExt;
-                    let wide: Vec<u16> = driver_dir
-                        .as_os_str()
-                        .encode_wide()
-                        .chain(std::iter::once(0))
-                        .collect();
-                    unsafe {
-                        windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW(wide.as_ptr());
-                    }
-                    log::info!("[startup] DLL search path set to: {}", driver_dir.display());
-                }
-            }
-        }
-    }
+    // DLL 加载策略（2026-06-12 调整）：
+    // interception.dll 现在通过 build.rs 自动复制到 exe 同级目录，
+    // Windows 加载器按标准搜索顺序（应用程序所在目录优先）自动加载，
+    // 不再需要 SetDllDirectoryW 设置子目录搜索路径。
 
     // DESIGN 13.1 启动顺序（阶段 10 当前覆盖 1-2 + 权限检测）：
     //   1. 初始化日志   ← 由 plugin builder 在 setup 之前装配
