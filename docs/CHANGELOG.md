@@ -1820,3 +1820,36 @@ Interception 同进程多 context 对同一设备的事件分发存在竞争，w
 无
 
 ---
+
+## 阶段 18.2：提示音录制 UI 重构（统一面板 + 热键保存按钮归位）
+
+**完成时间**：2026-06-11
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/pages/SettingsPage.vue](../src/pages/SettingsPage.vue) | 改 | ①「保存」按钮从页面底部移入「全局热键」卡片内（仅持久化热键，与录音无关）；②合并原「录制」与「剪裁」两个面板为一个统一面板：顶部全长波形 + 下方五按钮（开始录制 / 结束录制 / 试听 / 保存 / 取消）；③点「录制」仅展开面板不采集，由「开始录制」触发，支持重录；④试听选区时叠加绿色移动进度线（区别于橙色起止标记）。 |
+| [docs/REQUIREMENTS.md](./REQUIREMENTS.md) | 改 | 3.14 重写为「统一面板 + 五按钮」流程，去掉独立「剪裁态」与「完成」按钮的表述。 |
+| [docs/DESIGN.md](./DESIGN.md) | 改 | 20.7 同步为统一面板设计；波形统一 60px，标记 / 进度线为 canvas 之上 HTML 叠加层。 |
+
+### 关键决策
+
+- **复用后端命令，零后端改动**：`start_recording` / `stop_recording` / `cancel_recording` / `save_trimmed_audio` / `preview_sound` / `get_sound_status` 与事件协议（`recording_amplitude` / `recording_finished` / `recording_error`）均不变；「统一面板」只是把原先两个前端子态合并到同一容器，录制完成仍走 `recording_finished` 带回 base64 PCM。
+- **状态合并**：原 `recordingTarget` + `trimmingTarget` + `trimmingSamples` 合并为 `panelTarget` + `isRecording` + `recordedSamples`，同一面板内用 `isRecording` / `hasRecording` 区分实时波形与静态剪裁两种呈现。
+- **进度线用 HTML 叠加层而非 canvas 重绘**：随 `AudioContext.currentTime` 用 `requestAnimationFrame` 更新百分比定位，颜色取 `--success`（绿）与标记 `--accent`（橙）区分；与波形绘制解耦，避免播放期间频繁重绘静态波形。
+- **保存按钮归位**：该按钮语义仅为持久化热键，移入热键卡片底部（`margin-top` 由 `auto` 改 `12px`），录音区块自带独立的「保存」（裁剪写盘），二者互不相关。
+
+### 验证结果
+
+- `npm run build`（`vue-tsc --noEmit` + `vite build`）— 通过，51 模块，无 TS / Vue 错误。
+- 实机录制 / 试听 / 保存 / 取消 / 重录 / 进度线 — ⏳ 待用户实机复核。
+
+### 文档回写
+
+- REQUIREMENTS 3.14、DESIGN 20.7 已按统一面板流程同步（见改动摘要）。
+
+### 偏差与遗留
+
+- 录制面板的实时波形与剪裁波形共用一个 `waveCanvas` ref：同一时刻仅一个目标的面板渲染（`v-if="panelTarget === ..."`），故 ref 始终指向当前唯一挂载的 canvas，无冲突。
+- 实机相关验收项（采集 / 试听选区 / 写盘覆盖 / 进度线移动）待用户复核。

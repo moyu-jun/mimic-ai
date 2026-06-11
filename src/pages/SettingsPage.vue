@@ -1,8 +1,11 @@
 <script setup lang="ts">
 /**
- * 设置页 — 需求 3.3.4 / DESIGN 15.6
- * 复用 KeyCaptureInput 渲染启动 / 停止热键；保存按钮对比快照，有变化才提示。
- * 阶段 12：保存时调用 update_hotkeys 注册 + 持久化。
+ * 设置页 — 需求 3.3.4 / 3.14 / DESIGN 15.6 / 20
+ * 上半：启动 / 停止热键捕获 + 保存（保存按钮属于热键卡片，仅持久化热键）。
+ * 下半：提示音录制。初始每项提供「试听 / 录制」；点「录制」展开统一面板：
+ *   顶部完整波形 + 下方五个按钮（开始录制 / 结束录制 / 试听 / 保存 / 取消）。
+ *   录制中实时波形；停止（或 5s 自动）后波形静态，叠加可拖动的起始 / 结束标记，
+ *   「试听」播放选区并显示移动进度线，「保存」裁剪写盘，「取消」丢弃并关闭面板。
  */
 import { ref, onMounted, onBeforeUnmount, computed, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
@@ -101,19 +104,16 @@ async function onSave(): Promise<void> {
   }
 }
 
-// ===== 提示音录制（阶段 18） =====
+// ===== 提示音录制（阶段 18 / 18.1，统一面板） =====
 
 type SoundTarget = 'start' | 'stop'
 
 const MAX_REC_SECS = 5
+const MIN_SELECTION_MS = 100 // 需求 3.14：最短 100ms
 
 /** 文件是否已存在 */
 const startExists = ref(false)
 const stopExists = ref(false)
-/** 当前正在录制的目标；null 表示空闲 */
-const recordingTarget = ref<SoundTarget | null>(null)
-/** 录制已用时长（毫秒，前端计时仅作显示） */
-const recElapsedMs = ref(0)
 /** 麦克风是否可用（录制失败 no_input_device 时置 false 并禁用按钮） */
 const micUnavailable = ref(false)
 /** 录制区块提示文字 */
@@ -121,29 +121,52 @@ const recMessage = ref<string | null>(null)
 const recIsWarning = ref(false)
 let recMsgTimer: number | null = null
 
-/** 波形环形缓冲（最近 N 个幅度采样，0~1） */
+/** 统一面板：当前打开的目标；null 表示未展开（仅显示初始 试听/录制） */
+const panelTarget = ref<SoundTarget | null>(null)
+/** 是否正在采集 */
+const isRecording = ref(false)
+/** 录制已用时长（毫秒，前端计时仅作显示） */
+const recElapsedMs = ref(0)
+
+/** 录制完成后的缓冲（用于剪裁 / 试听 / 保存）；null 表示尚未录制 */
+const recordedSamples = ref<Int16Array | null>(null)
+const recSampleRate = ref(44100)
+const recDurationMs = ref(0)
+const trimStart = ref(0)
+const trimEnd = ref(0)
+const draggingMarker = ref<'start' | 'end' | null>(null)
+/** 试听进度（毫秒）；null 表示未在播放 */
+const playbackMs = ref<number | null>(null)
+
+const hasRecording = computed(() => recordedSamples.value !== null)
+/** 模拟运行 / 拾取期间禁用整个区块（Recording 不算忙） */
+const simulationBusy = computed(() =>
+  ['RunningKeyboard', 'RunningMouse', 'PickingMouse'].includes(appStore.runtimeStatus)
+)
+
+/** 波形 canvas（录制实时 + 静态共用；同一时刻仅一个面板渲染，故共用一个 ref） */
+const waveCanvas = ref<HTMLCanvasElement | null>(null)
+let rafId: number | null = null
+let recTimer: number | null = null
+
+/** 波形环形缓冲（最近 N 个幅度采样，0~1，仅录制中使用） */
 const WAVE_LEN = 150
 const waveBuf = new Array<number>(WAVE_LEN).fill(0)
 let waveWritePos = 0
-const waveCanvasStart = ref<HTMLCanvasElement | null>(null)
-const waveCanvasStop = ref<HTMLCanvasElement | null>(null)
-let rafId: number | null = null
-let recTimer: number | null = null
+
+/** 试听播放上下文 */
+let audioCtx: AudioContext | null = null
+let playSrc: AudioBufferSourceNode | null = null
+let playRaf: number | null = null
 
 let unlistenAmp: UnlistenFn | null = null
 let unlistenFinished: UnlistenFn | null = null
 let unlistenError: UnlistenFn | null = null
 
-// ===== 剪裁态（阶段 18.1）=====
-const trimmingTarget = ref<SoundTarget | null>(null)
-const trimmingSamples = ref<Int16Array | null>(null)
-const trimmingSampleRate = ref(44100)
-const trimmingDurationMs = ref(0)
-const trimStart = ref(0)
-const trimEnd = ref(0)
-const draggingMarker = ref<'start' | 'end' | null>(null)
-const trimCanvasStart = ref<HTMLCanvasElement | null>(null)
-const trimCanvasStop = ref<HTMLCanvasElement | null>(null)
+const recElapsedLabel = computed(() => {
+  const s = Math.min(Math.floor(recElapsedMs.value / 1000), MAX_REC_SECS)
+  return `0:0${s} / 0:0${MAX_REC_SECS}`
+})
 
 const trimRangeLabel = computed(() => {
   const s = (trimStart.value / 1000).toFixed(1)
@@ -152,10 +175,11 @@ const trimRangeLabel = computed(() => {
   return `已选 ${s}s ~ ${e}s（${dur}秒）`
 })
 
-const recElapsedLabel = computed(() => {
-  const s = Math.min(Math.floor(recElapsedMs.value / 1000), MAX_REC_SECS)
-  return `0:0${s} / 0:0${MAX_REC_SECS}`
-})
+/** 标记 / 进度线在波形上的百分比定位 */
+function markerLeft(ms: number): string {
+  if (recDurationMs.value <= 0) return '0%'
+  return (ms / recDurationMs.value) * 100 + '%'
+}
 
 function showRecMessage(text: string, warning = false): void {
   recMessage.value = text
@@ -178,11 +202,35 @@ async function refreshSoundStatus(): Promise<void> {
   }
 }
 
-async function onStartRecord(target: SoundTarget): Promise<void> {
-  if (recordingTarget.value !== null) return
+/** 播放已存在的提示音文件（初始行「试听」） */
+async function onPreviewFile(target: SoundTarget): Promise<void> {
+  try {
+    await invoke('preview_sound', { target })
+  } catch (err) {
+    console.error('preview_sound failed:', err)
+  }
+}
+
+/** 点「录制」展开统一面板，但不立即开始采集（由用户点「开始录制」触发） */
+function onOpenRecordPanel(target: SoundTarget): void {
+  if (panelTarget.value !== null) return
+  panelTarget.value = target
+  isRecording.value = false
+  recordedSamples.value = null
+  recElapsedMs.value = 0
+  playbackMs.value = null
+  nextTick(() => clearCanvas())
+}
+
+/** 开始 / 重新开始采集 */
+async function onStartRecord(): Promise<void> {
+  if (panelTarget.value === null || isRecording.value) return
+  const target = panelTarget.value
   try {
     await invoke('start_recording', { target })
-    recordingTarget.value = target
+    isRecording.value = true
+    recordedSamples.value = null // 重录丢弃旧缓冲
+    playbackMs.value = null
     recElapsedMs.value = 0
     waveBuf.fill(0)
     waveWritePos = 0
@@ -191,13 +239,19 @@ async function onStartRecord(target: SoundTarget): Promise<void> {
     recTimer = window.setInterval(() => {
       recElapsedMs.value = Date.now() - startTs
       if (recElapsedMs.value >= MAX_REC_SECS * 1000) {
-        // 后端到上限也会自停；此处主动停一次保证 UI 一致
+        // 后端到上限也会自停；此处主动停一次保证 UI 一致。
+        // 先清计时器，避免在 recording_finished 回来前重复 invoke('stop_recording')。
+        if (recTimer !== null) {
+          window.clearInterval(recTimer)
+          recTimer = null
+        }
         void onStopRecord()
       }
     }, 100)
     await nextTick()
     startWaveLoop()
   } catch (err) {
+    isRecording.value = false
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes('no_input_device')) {
       micUnavailable.value = true
@@ -209,36 +263,42 @@ async function onStartRecord(target: SoundTarget): Promise<void> {
   }
 }
 
+/** 结束采集（保存缓冲，进入剪裁）；收尾在 recording_finished 事件 */
 async function onStopRecord(): Promise<void> {
-  if (recordingTarget.value === null) return
+  if (!isRecording.value) return
   try {
     await invoke('stop_recording')
   } catch (err) {
     console.error('stop_recording failed:', err)
   }
-  // 收尾统一在 recording_finished 事件处理
 }
 
-async function onCancelRecord(): Promise<void> {
-  if (recordingTarget.value === null) return
-  try {
-    await invoke('cancel_recording')
-  } catch (err) {
-    console.error('cancel_recording failed:', err)
+/** 取消：录制中先取消采集（关闭在 finished 事件），否则直接关闭面板 */
+async function onCancelPanel(): Promise<void> {
+  if (isRecording.value) {
+    try {
+      await invoke('cancel_recording')
+    } catch (err) {
+      console.error('cancel_recording failed:', err)
+    }
+    return
   }
+  closePanel()
 }
 
-async function onPreview(target: SoundTarget): Promise<void> {
-  try {
-    await invoke('preview_sound', { target })
-  } catch (err) {
-    console.error('preview_sound failed:', err)
-  }
+/** 关闭面板并复位本地状态 */
+function closePanel(): void {
+  stopPlayback()
+  stopRecLoop()
+  panelTarget.value = null
+  isRecording.value = false
+  recordedSamples.value = null
+  playbackMs.value = null
+  if (appStore.runtimeStatus === 'Recording') appStore.runtimeStatus = 'Idle'
 }
 
-/** 重置录制本地状态（事件收尾或卸载时调用） */
-function resetRecordingState(): void {
-  recordingTarget.value = null
+/** 停止录制计时器与实时重绘 */
+function stopRecLoop(): void {
   if (recTimer !== null) {
     window.clearInterval(recTimer)
     recTimer = null
@@ -249,21 +309,32 @@ function resetRecordingState(): void {
   }
 }
 
+// ===== 波形绘制 =====
+function clearCanvas(): void {
+  const canvas = waveCanvas.value
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  const cw = canvas.clientWidth
+  if (canvas.width !== cw) canvas.width = cw
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+}
+
 function startWaveLoop(): void {
   if (rafId !== null) return
   const draw = () => {
-    drawWave()
+    drawRecordingWave()
     rafId = requestAnimationFrame(draw)
   }
   rafId = requestAnimationFrame(draw)
 }
 
-function drawWave(): void {
-  const canvas = recordingTarget.value === 'start' ? waveCanvasStart.value : waveCanvasStop.value
+/** 录制中：环形缓冲实时柱状波形 */
+function drawRecordingWave(): void {
+  const canvas = waveCanvas.value
   if (!canvas) return
   const ctx = canvas.getContext('2d')
   if (!ctx) return
-  // 同步 canvas 分辨率到 CSS 尺寸（避免模糊 + 响应容器宽度）
   const cw = canvas.clientWidth
   if (canvas.width !== cw) canvas.width = cw
   const w = canvas.width
@@ -274,44 +345,25 @@ function drawWave(): void {
   const accent = getComputedStyle(canvas).getPropertyValue('--accent').trim()
   ctx.fillStyle = accent || '#FE7733'
   for (let i = 0; i < WAVE_LEN; i++) {
-    // 从最旧到最新读取环形缓冲
     const idx = (waveWritePos + i) % WAVE_LEN
     const barH = Math.max(1, waveBuf[idx] * (h - 2))
     ctx.fillRect(i * barW, mid - barH / 2, Math.max(1, barW - 1), barH)
   }
 }
 
-// ===== 剪裁逻辑函数（阶段 18.1）=====
-function enterTrimmingMode(target: SoundTarget, base64: string, sr: number, dur: number) {
-  // base64 → Int16Array
-  const bin = atob(base64)
-  const buf = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
-  const samples = new Int16Array(buf.buffer)
-
-  trimmingTarget.value = target
-  trimmingSamples.value = samples
-  trimmingSampleRate.value = sr
-  trimmingDurationMs.value = dur
-  trimStart.value = 0
-  trimEnd.value = dur
-  appStore.runtimeStatus = 'Idle'
-
-  nextTick(() => drawTrimWave())
-}
-
-function drawTrimWave() {
-  const canvas = trimmingTarget.value === 'start' ? trimCanvasStart.value : trimCanvasStop.value
-  if (!canvas || !trimmingSamples.value) return
+/** 录制完成：全长静态波形 + 选区遮罩（标记 / 进度线为 HTML 叠加层） */
+function drawStaticWave(): void {
+  const canvas = waveCanvas.value
+  const samples = recordedSamples.value
+  if (!canvas || !samples) return
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   const cw = canvas.clientWidth
   if (canvas.width !== cw) canvas.width = cw
-  const w = canvas.width, h = canvas.height
+  const w = canvas.width
+  const h = canvas.height
   ctx.clearRect(0, 0, w, h)
 
-  // 绘制全程波形（降采样）
-  const samples = trimmingSamples.value
   ctx.strokeStyle = getComputedStyle(canvas).getPropertyValue('--accent').trim() || '#FE7733'
   ctx.lineWidth = 1
   ctx.beginPath()
@@ -323,39 +375,74 @@ function drawTrimWave() {
   }
   ctx.stroke()
 
-  // 绘制选区遮罩（start 左侧 + end 右侧半透明灰）
+  // 选区外半透明遮罩
   ctx.fillStyle = 'rgba(0,0,0,0.5)'
-  const startX = (trimStart.value / trimmingDurationMs.value) * w
-  const endX = (trimEnd.value / trimmingDurationMs.value) * w
+  const startX = (trimStart.value / recDurationMs.value) * w
+  const endX = (trimEnd.value / recDurationMs.value) * w
   ctx.fillRect(0, 0, startX, h)
   ctx.fillRect(endX, 0, w - endX, h)
 }
 
-async function onPreviewTrimmed() {
-  if (!trimmingSamples.value) return
-  const ctx = new AudioContext()
-  const buf = ctx.createBuffer(1, trimmingSamples.value.length, trimmingSampleRate.value)
+// ===== 试听选区（Web Audio，带移动进度线） =====
+async function onPreviewSelection(): Promise<void> {
+  const samples = recordedSamples.value
+  if (!samples) return
+  stopPlayback()
+  if (!audioCtx) audioCtx = new AudioContext()
+  const ctx = audioCtx
+  const buf = ctx.createBuffer(1, samples.length, recSampleRate.value)
   const ch = buf.getChannelData(0)
-  for (let i = 0; i < trimmingSamples.value.length; i++) {
-    ch[i] = trimmingSamples.value[i] / 32768
-  }
+  for (let i = 0; i < samples.length; i++) ch[i] = samples[i] / 32768
   const src = ctx.createBufferSource()
   src.buffer = buf
   src.connect(ctx.destination)
   const startS = trimStart.value / 1000
   const durS = (trimEnd.value - trimStart.value) / 1000
+  const baseTime = ctx.currentTime
   src.start(0, startS, durS)
+  playSrc = src
+  playbackMs.value = trimStart.value
+  src.onended = () => stopPlayback()
+  const tick = () => {
+    const elapsedMs = (ctx.currentTime - baseTime) * 1000
+    const cur = trimStart.value + elapsedMs
+    if (cur >= trimEnd.value) {
+      stopPlayback()
+      return
+    }
+    playbackMs.value = cur
+    playRaf = requestAnimationFrame(tick)
+  }
+  playRaf = requestAnimationFrame(tick)
 }
 
-async function onConfirmTrim() {
-  if (trimmingTarget.value === null) return
+function stopPlayback(): void {
+  if (playSrc) {
+    try {
+      playSrc.onended = null
+      playSrc.stop()
+    } catch {
+      // 已停止，忽略
+    }
+    playSrc = null
+  }
+  if (playRaf !== null) {
+    cancelAnimationFrame(playRaf)
+    playRaf = null
+  }
+  playbackMs.value = null
+}
+
+/** 保存：裁剪选区写盘覆盖文件 */
+async function onSaveTrim(): Promise<void> {
+  if (panelTarget.value === null || !hasRecording.value) return
   try {
     await invoke('save_trimmed_audio', {
-      target: trimmingTarget.value,
+      target: panelTarget.value,
       startMs: trimStart.value,
       endMs: trimEnd.value,
     })
-    exitTrimmingMode()
+    closePanel()
     await refreshSoundStatus()
     showRecMessage('已保存', false)
   } catch (err) {
@@ -363,34 +450,26 @@ async function onConfirmTrim() {
   }
 }
 
-function onCancelTrim() {
-  exitTrimmingMode()
-}
-
-function exitTrimmingMode() {
-  trimmingTarget.value = null
-  trimmingSamples.value = null
-  appStore.runtimeStatus = 'Idle'
-}
-
-function onMarkerMouseDown(marker: 'start' | 'end', e: MouseEvent) {
+function onMarkerMouseDown(marker: 'start' | 'end', e: MouseEvent): void {
   e.preventDefault()
+  stopPlayback()
   draggingMarker.value = marker
 
   const onMove = (me: MouseEvent) => {
     if (!draggingMarker.value) return
-    const canvas = trimmingTarget.value === 'start' ? trimCanvasStart.value : trimCanvasStop.value
+    const canvas = waveCanvas.value
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
-    const x = me.clientX - rect.left
-    const ratio = x / rect.width
-    const ms = Math.max(0, Math.min(trimmingDurationMs.value, ratio * trimmingDurationMs.value))
+    const ratio = (me.clientX - rect.left) / rect.width
+    const ms = Math.max(0, Math.min(recDurationMs.value, ratio * recDurationMs.value))
     if (draggingMarker.value === 'start') {
-      trimStart.value = Math.min(ms, trimEnd.value - 100)
+      // 夹到 [0, trimEnd - MIN]；录制时长 < MIN 时退化为 0，避免负值
+      trimStart.value = Math.max(0, Math.min(ms, trimEnd.value - MIN_SELECTION_MS))
     } else {
-      trimEnd.value = Math.max(ms, trimStart.value + 100)
+      // 夹到 [trimStart + MIN, recDurationMs]；避免越过画布右界
+      trimEnd.value = Math.min(recDurationMs.value, Math.max(ms, trimStart.value + MIN_SELECTION_MS))
     }
-    drawTrimWave()
+    drawStaticWave()
   }
   const onUp = () => {
     draggingMarker.value = null
@@ -399,6 +478,14 @@ function onMarkerMouseDown(marker: 'start' | 'end', e: MouseEvent) {
   }
   window.addEventListener('mousemove', onMove)
   window.addEventListener('mouseup', onUp)
+}
+
+/** 解码 base64 PCM → Int16Array */
+function decodeSamples(base64: string): Int16Array {
+  const bin = atob(base64)
+  const buf = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+  return new Int16Array(buf.buffer)
 }
 
 onMounted(async () => {
@@ -415,26 +502,29 @@ onMounted(async () => {
     sampleRate?: number
     durationMs: number
   }>('recording_finished', (e) => {
-    resetRecordingState()
+    stopRecLoop()
+    isRecording.value = false
     if (e.payload.cancelled) {
-      appStore.runtimeStatus = 'Idle'
+      closePanel()
       return
     }
-    // 录制完成，进入剪裁态
-    if (e.payload.samplesBase64 && recordingTarget.value) {
-      enterTrimmingMode(
-        recordingTarget.value,
-        e.payload.samplesBase64,
-        e.payload.sampleRate || 44100,
-        e.payload.durationMs
-      )
-    } else {
+    // 录制完成：缓冲就绪，进入同面板的剪裁子态
+    if (e.payload.samplesBase64 && panelTarget.value) {
+      recordedSamples.value = decodeSamples(e.payload.samplesBase64)
+      recSampleRate.value = e.payload.sampleRate || 44100
+      recDurationMs.value = e.payload.durationMs
+      trimStart.value = 0
+      trimEnd.value = e.payload.durationMs
       appStore.runtimeStatus = 'Idle'
+      nextTick(() => drawStaticWave())
+    } else {
+      closePanel()
     }
   })
 
   unlistenError = await listen<{ error: string }>('recording_error', (e) => {
-    resetRecordingState()
+    stopRecLoop()
+    isRecording.value = false
     appStore.runtimeStatus = 'Idle'
     const err = e.payload.error
     if (err.includes('no_input_device')) {
@@ -448,10 +538,15 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   // 离开设置页时若仍在录制，取消之
-  if (recordingTarget.value !== null) {
+  if (isRecording.value) {
     void invoke('cancel_recording').catch(() => {})
   }
-  resetRecordingState()
+  stopPlayback()
+  stopRecLoop()
+  if (audioCtx) {
+    void audioCtx.close().catch(() => {})
+    audioCtx = null
+  }
   if (recMsgTimer !== null) window.clearTimeout(recMsgTimer)
   if (messageTimer !== null) window.clearTimeout(messageTimer)
   unlistenAmp?.()
@@ -460,7 +555,7 @@ onBeforeUnmount(() => {
 })
 
 onMounted(() => {
-  // 设置页不是可触发模拟页 → runtimeStatus 维持 Idle（任务 4）
+  // 设置页不是可触发模拟页 → runtimeStatus 维持 Idle
   appStore.runtimeStatus = 'Idle'
 })
 </script>
@@ -482,6 +577,18 @@ onMounted(() => {
         <label class="form-label">停止热键</label>
         <KeyCaptureInput v-model="stopKey" placeholder="点击捕获按键" />
       </div>
+
+      <footer class="form-footer">
+        <span v-if="saveMessage" class="save-msg" :class="{ 'msg-warning': isWarning }">{{ saveMessage }}</span>
+        <button
+          type="button"
+          class="save-btn"
+          :disabled="!isDirty"
+          @click="onSave"
+        >
+          保存
+        </button>
+      </footer>
     </div>
 
     <header class="page-header section-gap">
@@ -493,46 +600,42 @@ onMounted(() => {
       <!-- 开启提示音 -->
       <div class="sound-item">
         <div class="sound-line">
-          <span class="dot" :class="recordingTarget === 'start' ? 'dot-rec' : startExists ? 'dot-on' : 'dot-off'"></span>
+          <span class="dot" :class="panelTarget === 'start' ? 'dot-rec' : startExists ? 'dot-on' : 'dot-off'"></span>
           <span class="sound-label">开启提示音</span>
           <span class="sound-state">
-            <template v-if="recordingTarget === 'start'">录制中 {{ recElapsedLabel }}</template>
+            <template v-if="panelTarget === 'start'">录制 / 剪裁中</template>
             <template v-else-if="startExists">已录制</template>
             <template v-else>未录制</template>
           </span>
-          <span class="sound-actions" v-if="recordingTarget !== 'start' && trimmingTarget !== 'start'">
-            <button type="button" class="mini-btn" :disabled="!startExists || recordingTarget !== null || trimmingTarget !== null" @click="onPreview('start')">试听</button>
-            <button type="button" class="mini-btn rec" :disabled="recordingTarget !== null || trimmingTarget !== null || micUnavailable" @click="onStartRecord('start')">录制</button>
+          <span class="sound-actions" v-if="panelTarget !== 'start'">
+            <button type="button" class="mini-btn" :disabled="!startExists || panelTarget !== null || simulationBusy" @click="onPreviewFile('start')">试听</button>
+            <button type="button" class="mini-btn rec" :disabled="panelTarget !== null || micUnavailable || simulationBusy" @click="onOpenRecordPanel('start')">录制</button>
           </span>
         </div>
-        <!-- 录制中 -->
-        <div v-if="recordingTarget === 'start'" class="rec-panel">
-          <canvas ref="waveCanvasStart" class="wave" height="40"></canvas>
+        <div v-if="panelTarget === 'start'" class="rec-panel">
+          <span class="rec-status">
+            <template v-if="isRecording">录制中 {{ recElapsedLabel }}</template>
+            <template v-else-if="hasRecording">{{ trimRangeLabel }}</template>
+            <template v-else>点击「开始录制」开始</template>
+          </span>
+          <div class="wave-wrap">
+            <canvas ref="waveCanvas" class="wave" height="60"></canvas>
+            <template v-if="!isRecording && hasRecording">
+              <div class="trim-marker start" :style="{ left: markerLeft(trimStart) }" @mousedown="onMarkerMouseDown('start', $event)">
+                <div class="marker-handle"></div>
+              </div>
+              <div class="trim-marker end" :style="{ left: markerLeft(trimEnd) }" @mousedown="onMarkerMouseDown('end', $event)">
+                <div class="marker-handle"></div>
+              </div>
+              <div v-if="playbackMs !== null" class="play-cursor" :style="{ left: markerLeft(playbackMs) }"></div>
+            </template>
+          </div>
           <div class="rec-buttons">
-            <button type="button" class="mini-btn" @click="onCancelRecord">取消</button>
-            <button type="button" class="mini-btn primary" @click="onStopRecord">完成</button>
-          </div>
-        </div>
-        <!-- 剪裁中 -->
-        <div v-if="trimmingTarget === 'start'" class="trim-panel">
-          <div class="trim-wave-wrap">
-            <canvas ref="trimCanvasStart" class="wave-trim" height="60"></canvas>
-            <div class="trim-marker start"
-                 :style="{left: (trimStart / trimmingDurationMs * 100) + '%'}"
-                 @mousedown="onMarkerMouseDown('start', $event)">
-              <div class="marker-handle"></div>
-            </div>
-            <div class="trim-marker end"
-                 :style="{left: (trimEnd / trimmingDurationMs * 100) + '%'}"
-                 @mousedown="onMarkerMouseDown('end', $event)">
-              <div class="marker-handle"></div>
-            </div>
-          </div>
-          <span class="trim-info">{{ trimRangeLabel }}</span>
-          <div class="trim-buttons">
-            <button type="button" class="mini-btn" @click="onPreviewTrimmed">试听</button>
-            <button type="button" class="mini-btn primary" @click="onConfirmTrim">确认</button>
-            <button type="button" class="mini-btn" @click="onCancelTrim">取消</button>
+            <button type="button" class="mini-btn rec" :disabled="isRecording" @click="onStartRecord">开始录制</button>
+            <button type="button" class="mini-btn" :disabled="!isRecording" @click="onStopRecord">结束录制</button>
+            <button type="button" class="mini-btn" :disabled="isRecording || !hasRecording" @click="onPreviewSelection">试听</button>
+            <button type="button" class="mini-btn primary" :disabled="isRecording || !hasRecording" @click="onSaveTrim">保存</button>
+            <button type="button" class="mini-btn" @click="onCancelPanel">取消</button>
           </div>
         </div>
       </div>
@@ -540,64 +643,48 @@ onMounted(() => {
       <!-- 关闭提示音 -->
       <div class="sound-item">
         <div class="sound-line">
-          <span class="dot" :class="recordingTarget === 'stop' ? 'dot-rec' : stopExists ? 'dot-on' : 'dot-off'"></span>
+          <span class="dot" :class="panelTarget === 'stop' ? 'dot-rec' : stopExists ? 'dot-on' : 'dot-off'"></span>
           <span class="sound-label">关闭提示音</span>
           <span class="sound-state">
-            <template v-if="recordingTarget === 'stop'">录制中 {{ recElapsedLabel }}</template>
+            <template v-if="panelTarget === 'stop'">录制 / 剪裁中</template>
             <template v-else-if="stopExists">已录制</template>
             <template v-else>未录制</template>
           </span>
-          <span class="sound-actions" v-if="recordingTarget !== 'stop' && trimmingTarget !== 'stop'">
-            <button type="button" class="mini-btn" :disabled="!stopExists || recordingTarget !== null || trimmingTarget !== null" @click="onPreview('stop')">试听</button>
-            <button type="button" class="mini-btn rec" :disabled="recordingTarget !== null || trimmingTarget !== null || micUnavailable" @click="onStartRecord('stop')">录制</button>
+          <span class="sound-actions" v-if="panelTarget !== 'stop'">
+            <button type="button" class="mini-btn" :disabled="!stopExists || panelTarget !== null || simulationBusy" @click="onPreviewFile('stop')">试听</button>
+            <button type="button" class="mini-btn rec" :disabled="panelTarget !== null || micUnavailable || simulationBusy" @click="onOpenRecordPanel('stop')">录制</button>
           </span>
         </div>
-        <!-- 录制中 -->
-        <div v-if="recordingTarget === 'stop'" class="rec-panel">
-          <canvas ref="waveCanvasStop" class="wave" height="40"></canvas>
+        <div v-if="panelTarget === 'stop'" class="rec-panel">
+          <span class="rec-status">
+            <template v-if="isRecording">录制中 {{ recElapsedLabel }}</template>
+            <template v-else-if="hasRecording">{{ trimRangeLabel }}</template>
+            <template v-else>点击「开始录制」开始</template>
+          </span>
+          <div class="wave-wrap">
+            <canvas ref="waveCanvas" class="wave" height="60"></canvas>
+            <template v-if="!isRecording && hasRecording">
+              <div class="trim-marker start" :style="{ left: markerLeft(trimStart) }" @mousedown="onMarkerMouseDown('start', $event)">
+                <div class="marker-handle"></div>
+              </div>
+              <div class="trim-marker end" :style="{ left: markerLeft(trimEnd) }" @mousedown="onMarkerMouseDown('end', $event)">
+                <div class="marker-handle"></div>
+              </div>
+              <div v-if="playbackMs !== null" class="play-cursor" :style="{ left: markerLeft(playbackMs) }"></div>
+            </template>
+          </div>
           <div class="rec-buttons">
-            <button type="button" class="mini-btn" @click="onCancelRecord">取消</button>
-            <button type="button" class="mini-btn primary" @click="onStopRecord">完成</button>
-          </div>
-        </div>
-        <!-- 剪裁中 -->
-        <div v-if="trimmingTarget === 'stop'" class="trim-panel">
-          <div class="trim-wave-wrap">
-            <canvas ref="trimCanvasStop" class="wave-trim" height="60"></canvas>
-            <div class="trim-marker start"
-                 :style="{left: (trimStart / trimmingDurationMs * 100) + '%'}"
-                 @mousedown="onMarkerMouseDown('start', $event)">
-              <div class="marker-handle"></div>
-            </div>
-            <div class="trim-marker end"
-                 :style="{left: (trimEnd / trimmingDurationMs * 100) + '%'}"
-                 @mousedown="onMarkerMouseDown('end', $event)">
-              <div class="marker-handle"></div>
-            </div>
-          </div>
-          <span class="trim-info">{{ trimRangeLabel }}</span>
-          <div class="trim-buttons">
-            <button type="button" class="mini-btn" @click="onPreviewTrimmed">试听</button>
-            <button type="button" class="mini-btn primary" @click="onConfirmTrim">确认</button>
-            <button type="button" class="mini-btn" @click="onCancelTrim">取消</button>
+            <button type="button" class="mini-btn rec" :disabled="isRecording" @click="onStartRecord">开始录制</button>
+            <button type="button" class="mini-btn" :disabled="!isRecording" @click="onStopRecord">结束录制</button>
+            <button type="button" class="mini-btn" :disabled="isRecording || !hasRecording" @click="onPreviewSelection">试听</button>
+            <button type="button" class="mini-btn primary" :disabled="isRecording || !hasRecording" @click="onSaveTrim">保存</button>
+            <button type="button" class="mini-btn" @click="onCancelPanel">取消</button>
           </div>
         </div>
       </div>
 
       <span v-if="recMessage" class="save-msg sound-msg" :class="{ 'msg-warning': recIsWarning }">{{ recMessage }}</span>
     </div>
-
-    <footer class="form-footer">
-      <span v-if="saveMessage" class="save-msg" :class="{ 'msg-warning': isWarning }">{{ saveMessage }}</span>
-      <button
-        type="button"
-        class="save-btn"
-        :disabled="!isDirty"
-        @click="onSave"
-      >
-        保存
-      </button>
-    </footer>
   </section>
 </template>
 
@@ -684,7 +771,7 @@ onMounted(() => {
   justify-content: flex-end;
   gap: 12px;
   height: 32px;
-  margin-top: auto;
+  margin-top: 12px;
 }
 
 .save-msg {
@@ -737,7 +824,7 @@ onMounted(() => {
   cursor: not-allowed;
 }
 
-/* ===== 提示音录制（阶段 18） ===== */
+/* ===== 提示音录制 ===== */
 .section-gap {
   margin-top: 4px;
 }
@@ -846,48 +933,25 @@ onMounted(() => {
   background: var(--accent-hover);
 }
 
+/* ===== 统一录制 / 剪裁面板 ===== */
 .rec-panel {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding-left: 18px;
-  max-width: 100%;
-  overflow: hidden;
-}
-
-.wave {
-  flex: 1;
-  min-width: 0;
-  height: 40px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-subtle);
-  border-radius: 5px;
-}
-
-.rec-buttons {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.sound-msg {
-  align-self: flex-end;
-}
-
-/* ===== 剪裁样式（阶段 18.1）===== */
-.trim-panel {
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding-left: 18px;
 }
 
-.trim-wave-wrap {
+.rec-status {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.wave-wrap {
   position: relative;
   width: 100%;
 }
 
-.wave-trim {
+.wave {
   width: 100%;
   height: 60px;
   background: var(--bg-primary);
@@ -917,14 +981,22 @@ onMounted(() => {
   border: 2px solid var(--color-paper-white);
 }
 
-.trim-info {
-  font-size: 11px;
-  color: var(--text-secondary);
-  padding-left: 0;
+/* 试听进度线 — 与起始 / 结束标记（橙色）区别开（绿色） */
+.play-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--success);
+  pointer-events: none;
 }
 
-.trim-buttons {
+.rec-buttons {
   display: flex;
   gap: 8px;
+}
+
+.sound-msg {
+  align-self: flex-end;
 }
 </style>
