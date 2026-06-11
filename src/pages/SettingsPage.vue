@@ -765,8 +765,8 @@ onMounted(() => {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px 18px;
+  gap: 10px;
+  padding: 12px 18px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
@@ -793,7 +793,7 @@ onMounted(() => {
   justify-content: flex-end;
   gap: 12px;
   height: 32px;
-  margin-top: 12px;
+  margin-top: 2px;
 }
 
 .save-msg {
