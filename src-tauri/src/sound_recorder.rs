@@ -1,7 +1,7 @@
 // 提示音录制 — DESIGN 20 / 阶段 18
 //
 // 用 cpal 采集系统默认麦克风，累积 i16/mono PCM 到内存缓冲，停止时用 hound
-// 写入 WAV 并原子覆盖 exe 同级 `按键开启.wav` / `按键关闭.wav`。
+// 写入 WAV 并原子覆盖 exe 同级 audio 目录下的 `按键开启.wav` / `按键关闭.wav`。
 //
 // 线程模型：cpal 的 Stream 是 !Send，无法跨命令存放，因此由一个专用录制线程
 // 创建并持有 Stream，命令通过 channel 发停止/取消信号；音频缓冲与最新峰值经
@@ -343,7 +343,8 @@ pub fn save_trimmed_audio(
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .ok_or_else(|| "no exe dir".to_string())?;
-    let final_path = dir.join(file_name);
+    let audio_dir = dir.join("audio");
+    let final_path = audio_dir.join(file_name);
 
     write_wav(&final_path, trimmed, sample_rate)?;
     info!("[recorder] trimmed audio saved to {}", final_path.display());

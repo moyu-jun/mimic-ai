@@ -6,7 +6,7 @@
 //   3. 服务项不存在 → 驱动未安装
 //
 // 安装策略：
-//   定位 <exe_dir>/drivers/interception/install-interception.exe
+//   定位 <exe_dir>/driver/install-interception.exe
 //   通过 ShellExecuteExW("runas") 以管理员身份静默调用 `/install` 参数，
 //   并 WaitForSingleObject 等待安装器进程退出后再返回（否则注册表尚未写完，
 //   后续 check_interception_driver() 会误判为 NotInstalled）。
@@ -122,10 +122,7 @@ fn run_installer_windows(action_param: &str) -> Result<(), String> {
         .ok_or_else(|| "No parent directory for exe".to_string())?
         .to_path_buf();
 
-    let installer_path = exe_dir
-        .join("drivers")
-        .join("interception")
-        .join("install-interception.exe");
+    let installer_path = exe_dir.join("driver").join("install-interception.exe");
 
     if !installer_path.exists() {
         return Err(format!(

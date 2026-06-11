@@ -290,12 +290,12 @@
 
 1. 在 [src-tauri/src/driver.rs](src-tauri/src/driver.rs) 实现 `check_interception_driver() -> DriverStatus`（DESIGN 12.2）：尝试 `interception::create_context()`；失败则查注册表/文件系统判断是否已安装但未重启。
 2. 注册命令 `check_driver_status -> DriverStatus`，事件 `driver_status_changed`。
-3. 实现 `install_driver`：定位 `<exe_dir>/drivers/interception/install-interception.exe`，通过 `runas` 启动；安装完成后弹窗提示重启电脑；状态切换到 `InstalledNeedReboot`。
+3. 实现 `install_driver`：定位 `<exe_dir>/driver/install-interception.exe`，通过 `runas` 启动；安装完成后弹窗提示重启电脑；状态切换到 `InstalledNeedReboot`。
 4. 前端 [src/pages/HomePage.vue](src/pages/HomePage.vue)：
    - 启动时 `invoke('check_driver_status')`，监听 `driver_status_changed`；
    - 「安装驱动」按钮接真实命令，安装中显示「正在安装驱动...」；
    - 状态栏在 `InstalledNeedReboot` 时附加「驱动待重启」提示。
-5. 驱动文件目录 `drivers/interception/` 占位 README，文件清单待确认事项 #1 完成后填入。
+5. 驱动文件目录 `driver/` 占位 README，文件清单待确认事项 #1 完成后填入。
 
 **可运行验收**：
 
@@ -427,7 +427,7 @@
    - 最小化 / 失焦后热键仍能触发；
    - Interception 在常见游戏窗口下的可用性；
    - 鼠标坐标拾取在游戏窗口 / 全屏下的可用性。
-5. 构建 release 包：确认 `mimic.ini` 在 exe 同级生成、日志级别为 `error`、`drivers/interception/` 目录被打包。
+5. 构建 release 包：确认 `mimic.ini` 在 exe 同级生成、日志级别为 `error`、`driver/` 目录被打包。
 
 **可运行验收**：
 
@@ -443,7 +443,7 @@
 
 任务：
 
-1. 新建 [src-tauri/src/sound.rs](src-tauri/src/sound.rs)：`PlaySoundW(SND_ASYNC | SND_FILENAME | SND_NODEFAULT)`，暴露 `play_start` / `play_stop`，文件取 exe 同级 `按键开启.wav` / `按键关闭.wav`。
+1. 新建 [src-tauri/src/sound.rs](src-tauri/src/sound.rs)：`PlaySoundW(SND_ASYNC | SND_FILENAME | SND_NODEFAULT)`，暴露 `play_start` / `play_stop`，文件取 exe 同级 audio 目录下的 `按键开启.wav` / `按键关闭.wav`。
 2. Cargo 增加 `windows-sys` 的 `Win32_Media_Audio` feature。
 3. 在 `hotkeys_interception.rs` 三处生效点接入：`handle_start_keyboard`（有勾选动作时）、`handle_start_mouse`（有有效坐标时）、`handle_stop_hotkey`（入口）。
 

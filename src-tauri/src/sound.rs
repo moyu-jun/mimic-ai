@@ -4,9 +4,9 @@
 // 当一个声音正在播放时再次调用 PlaySoundW 会自动打断旧声音并播放新声音，
 // 天然满足「短时间内连续触发时优先播放后者、前者直接被打断」的需求。
 //
-// 声音文件位于 exe 同级目录：
-//   - 按键开启.wav —— 启动热键生效（进入 Running*）时播放
-//   - 按键关闭.wav —— 停止热键生效（Running* → Idle）时播放
+// 声音文件位于 exe 同级 audio 目录：
+//   - audio/按键开启.wav —— 启动热键生效（进入 Running*）时播放
+//   - audio/按键关闭.wav —— 停止热键生效（Running* → Idle）时播放
 
 #[cfg(windows)]
 fn play_file(file_name: &str) {
@@ -17,7 +17,7 @@ fn play_file(file_name: &str) {
 
     let path = match std::env::current_exe() {
         Ok(exe) => match exe.parent() {
-            Some(dir) => dir.join(file_name),
+            Some(dir) => dir.join("audio").join(file_name),
             None => {
                 log::error!("[sound] exe has no parent dir");
                 return;
@@ -87,16 +87,19 @@ pub fn purge_playing() {
 #[cfg(not(windows))]
 pub fn purge_playing() {}
 
-/// 返回 exe 同级提示音文件是否存在 — 阶段 18 设置页状态展示用。
+/// 返回 exe 同级 audio 目录下提示音文件是否存在 — 阶段 18 设置页状态展示用。
 pub fn sound_files_exist() -> (bool, bool) {
     let dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
     match dir {
-        Some(d) => (
-            d.join("按键开启.wav").exists(),
-            d.join("按键关闭.wav").exists(),
-        ),
+        Some(d) => {
+            let audio_dir = d.join("audio");
+            (
+                audio_dir.join("按键开启.wav").exists(),
+                audio_dir.join("按键关闭.wav").exists(),
+            )
+        }
         None => (false, false),
     }
 }

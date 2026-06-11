@@ -619,7 +619,7 @@ pub fn check_interception_driver() -> DriverStatus {
 
 **安装流程**（对应反馈 Q2/Q3）：
 
-外置目录：`<exe_dir>/drivers/interception/`，包含以下文件（直接入仓库）：
+外置目录：`<exe_dir>/driver/`，包含以下文件（直接入仓库）：
 - `install-interception.exe`（官方安装器）
 - `interception.dll`（驱动库文件）
 
@@ -631,10 +631,7 @@ pub fn install_interception_driver() -> Result<(), String> {
         .ok_or("No parent dir")?
         .to_path_buf();
 
-    let installer_path = exe_dir
-        .join("drivers")
-        .join("interception")
-        .join("install-interception.exe");
+    let installer_path = exe_dir.join("driver").join("install-interception.exe");
 
     if !installer_path.exists() {
         return Err("Driver installer not found".to_string());
