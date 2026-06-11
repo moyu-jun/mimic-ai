@@ -915,6 +915,7 @@ pub fn run_keyboard_simulation() {
   | `Error` | `--danger` (#FF5A4A) | 错误 |
 
 - 通过 `runtime_status_changed` 事件实时更新。
+- 状态栏**右侧**显示当前全局热键摘要：「启动：xx ｜ 停止：xx」，绑定到 `appStore.hotkeys`，热键变更后即时刷新（与首页「当前热键」卡片同源）。文案保持简短，不带「当前热键」前缀。
 
 ### 15.4 首页内容（状态仪表盘，对应需求 3.3.1）
 

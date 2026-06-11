@@ -146,6 +146,8 @@ const simulationBusy = computed(() =>
 
 /** 波形 canvas（录制实时 + 静态共用；同一时刻仅一个面板渲染，故共用一个 ref） */
 const waveCanvas = ref<HTMLCanvasElement | null>(null)
+/** 录制 / 剪裁面板 DOM ref（用于面板出现时自动滚动到可视区） */
+const recPanelEl = ref<HTMLElement | null>(null)
 let rafId: number | null = null
 let recTimer: number | null = null
 
@@ -219,7 +221,12 @@ function onOpenRecordPanel(target: SoundTarget): void {
   recordedSamples.value = null
   recElapsedMs.value = 0
   playbackMs.value = null
-  nextTick(() => clearCanvas())
+  nextTick(() => {
+    drawIdleWave()
+    // 设置页高度受限，下方面板默认在视口外；展开后滚动到面板底部可见，
+    // 让波形 + 按钮一并出现在用户视野内。
+    recPanelEl.value?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  })
 }
 
 /** 开始 / 重新开始采集 */
@@ -310,14 +317,21 @@ function stopRecLoop(): void {
 }
 
 // ===== 波形绘制 =====
-function clearCanvas(): void {
+/** 待录制：仅画一根居中横线，避免初始空白；与录制中柱状波形在 0 幅度时视觉一致。 */
+function drawIdleWave(): void {
   const canvas = waveCanvas.value
   if (!canvas) return
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   const cw = canvas.clientWidth
   if (canvas.width !== cw) canvas.width = cw
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  const w = canvas.width
+  const h = canvas.height
+  ctx.clearRect(0, 0, w, h)
+  const accent = getComputedStyle(canvas).getPropertyValue('--accent').trim()
+  ctx.fillStyle = accent || '#FE7733'
+  // 横线高度 1px，居中
+  ctx.fillRect(0, h / 2, w, 1)
 }
 
 function startWaveLoop(): void {
@@ -620,7 +634,7 @@ onMounted(() => {
             <button type="button" class="mini-btn rec" :disabled="panelTarget !== null || micUnavailable || simulationBusy" @click="onOpenRecordPanel('start')">录制</button>
           </span>
         </div>
-        <div v-if="panelTarget === 'start'" class="rec-panel">
+        <div v-if="panelTarget === 'start'" ref="recPanelEl" class="rec-panel">
           <span class="rec-status">
             <template v-if="isRecording">录制中 {{ recElapsedLabel }}</template>
             <template v-else-if="hasRecording">{{ trimRangeLabel }}</template>
@@ -640,7 +654,7 @@ onMounted(() => {
           </div>
           <div class="rec-buttons">
             <button type="button" class="mini-btn rec" :disabled="isRecording" @click="onStartRecord">开始录制</button>
-            <button type="button" class="mini-btn" :disabled="!isRecording" @click="onStopRecord">结束录制</button>
+            <button type="button" class="mini-btn rec" :disabled="!isRecording" @click="onStopRecord">结束录制</button>
             <button type="button" class="mini-btn" :disabled="isRecording || !hasRecording" @click="onPreviewSelection">试听</button>
             <button type="button" class="mini-btn primary" :disabled="isRecording || !hasRecording" @click="onSaveTrim">保存</button>
             <button type="button" class="mini-btn" @click="onCancelPanel">取消</button>
@@ -663,7 +677,7 @@ onMounted(() => {
             <button type="button" class="mini-btn rec" :disabled="panelTarget !== null || micUnavailable || simulationBusy" @click="onOpenRecordPanel('stop')">录制</button>
           </span>
         </div>
-        <div v-if="panelTarget === 'stop'" class="rec-panel">
+        <div v-if="panelTarget === 'stop'" ref="recPanelEl" class="rec-panel">
           <span class="rec-status">
             <template v-if="isRecording">录制中 {{ recElapsedLabel }}</template>
             <template v-else-if="hasRecording">{{ trimRangeLabel }}</template>
@@ -683,7 +697,7 @@ onMounted(() => {
           </div>
           <div class="rec-buttons">
             <button type="button" class="mini-btn rec" :disabled="isRecording" @click="onStartRecord">开始录制</button>
-            <button type="button" class="mini-btn" :disabled="!isRecording" @click="onStopRecord">结束录制</button>
+            <button type="button" class="mini-btn rec" :disabled="!isRecording" @click="onStopRecord">结束录制</button>
             <button type="button" class="mini-btn" :disabled="isRecording || !hasRecording" @click="onPreviewSelection">试听</button>
             <button type="button" class="mini-btn primary" :disabled="isRecording || !hasRecording" @click="onSaveTrim">保存</button>
             <button type="button" class="mini-btn" @click="onCancelPanel">取消</button>
@@ -806,8 +820,8 @@ onMounted(() => {
 
 .save-btn {
   height: 32px;
-  min-width: 96px;
-  padding: 0 24px;
+  width: 140px;
+  padding: 0;
   border-radius: 6px;
   background: var(--accent);
   color: var(--color-paper-white);
@@ -899,6 +913,13 @@ onMounted(() => {
 .sound-actions {
   display: flex;
   gap: 8px;
+  width: 140px;
+  flex-shrink: 0;
+}
+
+.sound-actions .mini-btn {
+  flex: 1;
+  padding: 0;
 }
 
 .mini-btn {

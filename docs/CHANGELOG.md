@@ -2011,3 +2011,45 @@ Interception 同进程多 context 对同一设备的事件分发存在竞争，w
 
 - 阶段 18.4 引入的 `uninstalledNeedReboot` 布尔在本阶段被 `pendingReboot` 取代（同一前端标志的演进，非历史回改）。
 - 实机验证（非管理员安装提示、管理员安装成功反馈与按钮切换）待用户在 Windows 环境完成。
+
+
+---
+
+## 阶段 18.6：UI 细节打磨
+
+**完成时间**：2026-06-11
+
+### 改动摘要
+
+| 文件 | 改动类型 | 关键点 |
+|------|---------|--------|
+| [src/pages/HomePage.vue](../src/pages/HomePage.vue) | 改 | 权限受限文案分场景切换：驱动未安装显示「非管理员权限，安装驱动需提权」，否则显示「非管理员权限，卸载驱动需提权」 |
+| [src/components/AppStatusBar.vue](../src/components/AppStatusBar.vue) | 改 | 状态栏右侧新增「启动：xx ｜ 停止：xx」热键摘要，绑定 `appStore.hotkeys`，热键保存后即时刷新 |
+| [src/pages/SettingsPage.vue](../src/pages/SettingsPage.vue) | 改 | 保存按钮宽度 `min-width:96px;padding:0 24px` 改为固定 `width:140px`（与 `KeyCaptureInput` 等宽）；`.sound-actions` 限宽 140px、按钮 `flex:1`，使试听 / 录制按钮组左右与上方输入框对齐；新增 `recPanelEl` ref，`onOpenRecordPanel` 末段 `scrollIntoView({block:'end'})`；新增 `drawIdleWave()` 在面板初始绘居中横线（替代空白 `clearCanvas`）；「结束录制」按钮改用 `mini-btn rec` 样式与「开始录制」对齐 |
+
+### 关键决策
+
+- **权限文案分场景**：原「管理员权限受限，安装驱动需提权」在驱动已安装的情况下措辞偏导向，且不能提示「卸载也需提权」；改为按 `driverStatus === 'NotInstalled'` 二选一切换，既明确当前可用动作，也让用户理解「安装/卸载」之外的功能不需要提权。
+- **状态栏与首页同源**：右侧热键摘要直接绑定 `appStore.hotkeys`（`reactive`），无需额外事件——`update_hotkeys` 成功后由 `SettingsPage.onSave` 写回 store，状态栏即时刷新。
+- **保存按钮等宽于输入框**：以 `KeyCaptureInput` 的 `width: 140px` 为对齐基准；保存按钮固定 140px 宽，使热键卡片右列纵向对齐。
+- **按钮组用 `width + flex:1` 实现两端对齐**：`.sound-actions` 框定 140px、内部两按钮 `flex:1 + gap:8px`，左右边界自动与上方输入框对齐，无需为每个按钮单独算宽度。
+- **`scrollIntoView({block:'end'})`**：录制面板包含波形 + 5 个按钮，垂直高度较大；以 `'end'` 让面板底部在视口内可见，保证按钮直接可点而不需用户再手动滚动。
+- **初始横线复用 canvas**：未抽 SVG 占位、未加伪元素，仅在 `drawIdleWave` 用 1px 高 fillRect 画一根橙色中线。`drawRecordingWave` 在所有 `waveBuf` 为 0 时柱体高度也是 1px、近似一根横线，故"待录制"与"录制中静音帧"视觉一致，过渡无突兀。
+- **「结束录制」改用 `rec` 样式**：用户希望两按钮的「可点 / 不可点」视觉一致；共用 `mini-btn rec` 类后两者完全对称（橙色描边 + 0.4 不透明度禁用态），无需新增样式分支。
+
+### 验证结果
+
+- `vue-tsc --noEmit` — 通过，无 TS/Vue 错误。
+- 纯前端改动，未触碰后端；视觉与交互效果待用户在 Windows 环境实机验证。
+
+### 文档回写
+
+- REQUIREMENTS § 2「按需提权」：未提权状态文案改为按驱动状态分场景描述。
+- REQUIREMENTS § 3.10：补充「状态栏右侧实时显示当前热键」的展示要求。
+- DESIGN § 15.3-bis：补充状态栏右侧热键摘要绑定。
+- TASKS：新增「阶段 18.6：UI 细节打磨」并标记完成。
+
+### 偏差与遗留
+
+- 实机验证（5 项 UI 细节的最终视觉与滚动交互）待用户在 Windows 环境完成。
+

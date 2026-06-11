@@ -2,6 +2,7 @@
 /**
  * 底部状态栏 — DESIGN 15.3-bis / 需求 3.10
  * 圆点 + 文案，颜色与文案按 runtimeStatus 映射。
+ * 右侧：实时同步当前热键（启动 / 停止），随 appStore.hotkeys 变化即时刷新。
  */
 import { computed } from 'vue'
 import { appStore } from '../stores/appStore'
@@ -31,6 +32,11 @@ const meta = computed(() => STATUS_MAP[appStore.runtimeStatus])
   <footer class="statusbar">
     <span class="dot" :style="{ background: meta.colorVar }"></span>
     <span class="status-text">{{ meta.label }}</span>
+    <span class="hotkey-info">
+      启动：<b>{{ appStore.hotkeys.start.keyLabel }}</b>
+      <span class="sep">|</span>
+      停止：<b>{{ appStore.hotkeys.stop.keyLabel }}</b>
+    </span>
   </footer>
 </template>
 
@@ -55,5 +61,21 @@ const meta = computed(() => STATUS_MAP[appStore.runtimeStatus])
 .status-text {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.hotkey-info {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.hotkey-info b {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.hotkey-info .sep {
+  margin: 0 6px;
+  color: var(--text-disabled);
 }
 </style>
