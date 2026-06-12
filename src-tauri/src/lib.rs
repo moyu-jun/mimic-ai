@@ -523,13 +523,9 @@ pub fn run() {
                 env!("CARGO_PKG_VERSION")
             );
 
-            // 音频设备预热 + 保活 — 消除 PlaySoundW 冷启动延迟
-            // 启动时同步播放 10ms 静音初始化 waveOut 设备；后台线程每 5s 重播保活。
-            // 与 Interception 驱动状态无关，始终启用。
-            sound::warmup();
-            // 内存常驻 wav 缓存 — DESIGN 18.4，触发路径走 SND_MEMORY，端到端 <10ms
-            sound::load_cache();
-            sound::start_keepalive();
+            // 音频设备初始化 — waveOut 预开设备 + 加载 PCM 缓冲
+            // 设备常驻不关闭，触发时 waveOutReset + waveOutWrite 即时播放，< 15ms。
+            sound::init();
 
             // 配置加载（路径 + 结果均记录日志）
             match config::config_path() {

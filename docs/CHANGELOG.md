@@ -86,7 +86,7 @@
 
 ---
 
-## 阶段 19：提示音延迟优化（内存常驻 + SND_MEMORY）
+## 阶段 19：提示音延迟优化（waveOut 直接操作）
 
 **完成时间**：2026-06-12
 
@@ -94,36 +94,37 @@
 
 | 文件 | 改动类型 | 关键点 |
 |------|---------|--------|
-| [src-tauri/src/sound.rs](../src-tauri/src/sound.rs) | 改 | 全文重写：新增 `SOUND_CACHE: OnceLock<RwLock<HashMap<&'static str, Arc<Vec<u8>>>>>`，暴露 `load_cache` / `reload_cache`，改写 `play_file` 走 `PlaySoundW(SND_MEMORY \| SND_ASYNC)` |
-| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | setup 顺序：`warmup()` → `load_cache()` → `start_keepalive()`（L526-531） |
-| [src-tauri/src/sound_recorder.rs](../src-tauri/src/sound_recorder.rs) | 改 | `save_trimmed_audio` 写盘成功后调 `crate::sound::reload_cache(file_name)`（L350-352）；`file_name` 从字面量改用模块常量 `crate::sound::FILE_START` / `FILE_STOP`（L302-306） |
-| [docs/REQUIREMENTS.md](../docs/REQUIREMENTS.md) | 改 | § 3.13 末尾追加「响应延迟要求 < 10ms」条目，说明触发路径零同步 I/O 约束 |
-| [docs/DESIGN.md](../docs/DESIGN.md) | 改 | § 18.4 新增「内存常驻缓存」小节，详述问题、方案、数据结构、生命周期、关键约束、预期收益 |
-| [docs/TASKS.md](../docs/TASKS.md) | 改 | 追加阶段 19 描述、任务清单、验收标准 |
+| [src-tauri/src/sound.rs](../src-tauri/src/sound.rs) | 改 | 全文重写：弃用 PlaySoundW，改用 waveOut API（`waveOutOpen` 常驻设备 + `waveOutPrepareHeader` 预备缓冲 + 触发时 `waveOutReset` + `waveOutWrite`）。暴露 `init` / `play_start` / `play_stop` / `purge_playing` / `reload_cache` / `sound_files_exist` 不变接口 |
+| [src-tauri/src/lib.rs](../src-tauri/src/lib.rs) | 改 | setup 顺序：`sound::init()`（替代原 `warmup` + `load_cache` + `start_keepalive`） |
+| [src-tauri/src/sound_recorder.rs](../src-tauri/src/sound_recorder.rs) | 改 | `save_trimmed_audio` 写盘成功后调 `crate::sound::reload_cache(file_name)` |
+| [docs/REQUIREMENTS.md](../docs/REQUIREMENTS.md) | 改 | § 3.13 末尾追加「响应延迟要求 < 10ms」条目 |
+| [docs/DESIGN.md](../docs/DESIGN.md) | 改 | § 18.4 重写为「waveOut 直接操作」方案 |
+| [docs/TASKS.md](../docs/TASKS.md) | 改 | 追加阶段 19 描述与验收清单 |
 
 ### 关键决策
 
-- **问题定位**：现有 `PlaySoundW(SND_FILENAME | SND_ASYNC)` 每次触发在调用线程同步完成「`current_exe()` + `path.exists()` + UTF-16 转换 + 打开文件 + 读完整内容 + 解析 RIFF 头」，堆叠 10–50ms 可感知延迟（冷盘更糟）。设备虽已通过 warmup / keepalive 保活，但文件 I/O 在触发瞬间不可避免。
-- **方案选型**：启动期一次性读两个 wav 进内存常驻缓存（`OnceLock<RwLock<HashMap>>`），触发路径直接走 `PlaySoundW(SND_MEMORY | SND_ASYNC | SND_NODEFAULT)` 从 `Arc<Vec<u8>>` 播放，零文件 I/O，端到端 < 5ms。备选「`waveOutOpen` + 预填 PCM 缓冲」可压到 <2ms 但代码量 ~150 行，通常无必要；先上方案 A，实测若仍嫌慢再上 waveOut。
-- **生命周期安全**：`SND_MEMORY + SND_ASYNC` 要求播放期间 buffer 存活。通过 cache 常驻一份 `Arc` 强引用 + 触发时 `Arc::clone` 保证安全；录制覆盖后调 `reload_cache` 前已在 `save_trimmed_audio` 中 `purge_playing()` 停止旧播放，替换缓存 entry 时不会 use-after-free。
-- **cache miss 语义**：文件启动时缺失或读失败 → key 留空 → 触发时 `log::warn` 静默跳过，与现有「文件不存在」分支一致，不报错、不阻塞模拟。
-- **与 warmup / keepalive 正交**：后者用合成静音 wav 保活 waveOut 设备（避免冷启动重新初始化 50~200ms），与本阶段「避免文件 I/O 10~50ms」独立叠加，共同压到 < 5ms。
+- **PlaySoundW 方案废弃**：实测 `PlaySoundW(SND_MEMORY | SND_ASYNC)` 即使配合 warmup/keepalive 仍有 200-400ms 结构性延迟（MME 管线每次调用走完整的设备打开→格式协商→缓冲入队→设备关闭流程），不是调参能解决的问题。
+- **直接 waveOut 操作**：`waveOutOpen` 启动时打开设备常驻不关闭，触发时仅需 `waveOutReset`（~1ms, 打断旧播放）+ `waveOutWrite`（~0ms, 队列新缓冲），加上内核→DAC 路径 ~5-10ms，总延迟 < 15ms。
+- **格式固定 44100/16/mono**：设备以此格式打开，加载时解析并验证 wav 头必须匹配。不匹配的文件视为缺失。我们的录制模块固定输出此格式。
+- **keepalive 线程移除**：waveOut 设备常驻打开，无空闲冷启动问题，不需要周期性保活。
+- **打断语义**：`waveOutReset` 立即停止所有排队缓冲（标记 WHDR_DONE），然后 `waveOutWrite` 提交新缓冲 — 天然实现「后触发优先打断前者」。
 
 ### 验证结果
 
-- `cargo check`：通过（11.35s）。
-- `cargo clippy -- -D warnings`：通过（4.63s）；SOUND_CACHE 类型复杂度用 `#[allow(clippy::type_complexity)]` 豁免（类型嵌套深但语义明确，不适合拆分 type alias）。
-- 实机验收：⏳ 待用户实机测试热键触发与试听按钮延迟是否 < 10ms、录制覆盖后 reload_cache 生效、cache miss 静默跳过。
+- `cargo check`：通过。
+- `cargo clippy -- -D warnings`：通过。
+- `cargo build`：通过（链接 winmm.dll waveOut* 函数成功）。
+- 实机验收：⏳ 待用户实机测试。
 
 ### 文档回写
 
-- REQUIREMENTS § 3.13：追加「响应延迟 < 10ms」非功能性能要求。
-- DESIGN § 18.4：新增内存常驻缓存策略完整设计。
-- TASKS：新增阶段 19。
+- REQUIREMENTS § 3.13：「响应延迟 < 10ms」条目（上一迭代已写入）。
+- DESIGN § 18.4：从 PlaySoundW(SND_MEMORY) 方案重写为 waveOut 直接操作方案。
+- TASKS：阶段 19 描述不变（验收标准兼容两种实现）。
 
 ### 偏差与遗留
 
-- 无。按 TASKS 阶段 19 任务清单完整实施，无偏差。
-- `make_silent_wav` 函数内注释尾空格对齐问题（rustfmt diff）为历史遗留，保持原样；仅规整新写代码的 `log::warn!` 多行格式。
+- 初始方案 A（PlaySoundW + SND_MEMORY + 内存缓存）经实测仍有 200-400ms 延迟，确认 PlaySoundW 存在结构性瓶颈后升级为方案 B（waveOut 直接操作）。最终方案比原计划代码量多 ~80 行，但延迟目标可达。
+- WAV 格式硬编码 44100/16/mono，不支持用户手动放入其它格式的 wav（会被静默跳过）。REQUIREMENTS 未明确要求支持任意格式，暂不处理。
 
 ---

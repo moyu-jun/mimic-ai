@@ -1062,37 +1062,59 @@ pub fn default_config() -> AppConfig {
 - 被忽略的热键（运行中再按启动、待机中按停止）不会进入上述任一 handler，故不播放，无需额外判断。
 - 启动键 == 停止键的 toggle 场景：由状态机按当前 `runtime_status` 路由到 START / STOP 分支，分别播放对应声音，逻辑天然正确。
 
-### 18.4 内存常驻缓存（极速响应优化 — 阶段 19）
+### 18.4 低延迟播放（waveOut 直接操作 — 阶段 19）
 
 > 对应 REQUIREMENTS 3.13「响应延迟 < 10ms」要求。
 
-**问题**：`PlaySoundW(SND_FILENAME | SND_ASYNC)` 即使设备已通过 warmup / keepalive 保持就绪，每次调用仍需在调用线程同步完成「`current_exe()` → `path.exists()` → UTF-16 转换 → 打开 wav 文件 → 读取全部字节 → 解析 RIFF 头」，叠加 10–50ms（冷盘更糟）的可感知延迟。
+**问题**：`PlaySoundW` 无论 `SND_FILENAME` 还是 `SND_MEMORY`，内部每次调用都走完整的 MME 管线（设备打开 → 格式协商 → 缓冲入队 → 设备关闭），结构性延迟 150–400ms，无法通过预热/保活消除。
 
-**方案**：启动时一次性把两个 wav 文件读入内存常驻缓存，后续调用走 `SND_MEMORY` 直接从内存播放，触发路径上零文件 I/O。
+**方案**：弃用 `PlaySoundW`，直接使用 `waveOut` API：
+1. 启动时 `waveOutOpen` 打开设备（44100Hz, 16-bit, mono），**设备常驻不关闭**。
+2. 加载 wav 后解析出纯 PCM 数据，`waveOutPrepareHeader` 预备缓冲。
+3. 触发时 `waveOutReset()`（打断旧播放 ~1ms）+ `waveOutWrite()`（队列新缓冲 ~0ms），内核 → DAC 路径 ~5-10ms。
+4. 无需 keepalive 线程 — 设备始终打开，无冷启动开销。
+5. 录制覆盖后 `reload_cache` 卸载旧 header + 重新解析 + 预备新 header。
 
-**数据结构**（`sound.rs` 模块内）：
+**数据结构**（`sound.rs::inner` 模块内）：
 
 ```rust
-static SOUND_CACHE: OnceLock<RwLock<HashMap<&'static str, Arc<Vec<u8>>>>> = OnceLock::new();
-// key 为 "按键开启.wav" / "按键关闭.wav" 字面量；value 为整个 wav 文件的字节副本（含 RIFF/WAVE 头）。
-// Arc 保证 SND_ASYNC 播放期间缓冲存活；下一次 PlaySoundW 调用会自动 purge 旧播放。
+static DEVICE: OnceLock<Mutex<Option<WaveDevice>>> = OnceLock::new();
+
+struct WaveDevice {
+    handle: HWAVEOUT,                            // 常驻打开的设备句柄
+    bufs: HashMap<&'static str, PreparedBuf>,    // 预备好的 PCM 缓冲
+}
+
+struct PreparedBuf {
+    hdr: Box<WAVEHDR>,    // 已 waveOutPrepareHeader 的 header（stable 地址）
+    _pcm: Arc<Vec<u8>>,   // 持有 PCM 数据生命周期
+}
+```
+
+**触发路径**（`play_file`）：
+```rust
+waveOutReset(dev.handle);           // 打断旧播放，标记所有 buffer done
+buf.hdr.dwFlags &= !WHDR_DONE;     // 清 done 标记
+buf.hdr.dwFlags |= WHDR_PREPARED;  // 确保 prepared 标记在位
+waveOutWrite(dev.handle, &mut buf.hdr, sizeof(WAVEHDR));  // 立即入队
 ```
 
 **生命周期**：
 
 | 时机 | 动作 |
 |------|------|
-| `setup`（warmup 之后） | `sound::load_cache()` 同步读两个 wav 进缓存；文件缺失则该 key 留空（cache miss 时跳过播放，行为对齐现状） |
-| `save_trimmed_audio` 写盘成功后 | `sound::reload_cache(target)` 读新文件覆盖对应 key |
-| `play_start` / `play_stop` | 从缓存取 `Arc<Vec<u8>>` 克隆一次，调用 `PlaySoundW(buf.as_ptr() as *const u16, NULL, SND_MEMORY \| SND_ASYNC \| SND_NODEFAULT)` |
-| `purge_playing` | 保持现状（`SND_PURGE`），与缓存层正交 |
+| `setup` | `sound::init()` → `waveOutOpen` + 加载两个 wav + `waveOutPrepareHeader` |
+| `play_start` / `play_stop` | `waveOutReset` + `waveOutWrite`（~5ms） |
+| `save_trimmed_audio` 写盘成功后 | `sound::reload_cache(target)` → `waveOutReset` + `waveOutUnprepareHeader` + 重读文件 + `waveOutPrepareHeader` |
+| `purge_playing` | `waveOutReset()`（录制前停止播放） |
+| 进程退出 | `Drop` → `waveOutReset` + `waveOutUnprepareHeader` × N + `waveOutClose` |
 
-**关键约束**：
-- `SND_MEMORY + SND_ASYNC` 要求播放期间 buffer 存活：`Arc` 在 cache 中常驻一份强引用,任意时刻都不会被释放,满足要求。
-- cache miss（文件不存在）时不报错、不退回 SND_FILENAME 兜底,行为与现有「文件不存在静默跳过」一致。
-- `warmup` / `start_keepalive` 已经使用 `SND_MEMORY` 播放静音 wav 保活设备,与本节正交,无需改动。
+**WAV 格式约束**：
+- 设备以 44100/16/mono 打开，加载时验证 wav 格式必须匹配（PCM, 1ch, 44100Hz, 16bit）。
+- 不匹配的文件视为缺失（log warn，触发时静默跳过）。
+- 我们自己的录制模块（hound）固定输出此格式，用户手动替换文件需符合规格。
 
-**预期收益**：触发路径开销由「~50–250ms」降至「Arc 克隆 + PlaySoundW 内部排队」< 5ms,叠加 Tauri IPC 1–3ms 后试听按钮端到端 < 8ms,满足 REQUIREMENTS 3.13 的 <10ms 要求。
+**预期收益**：触发延迟从 PlaySoundW 的 ~200-400ms 降至 waveOutReset + waveOutWrite + driver pipeline 的 ~5-15ms。
 
 ## 20. 提示音录制
 
