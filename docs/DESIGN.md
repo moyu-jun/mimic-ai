@@ -1109,10 +1109,11 @@ waveOutWrite(dev.handle, &mut buf.hdr, sizeof(WAVEHDR));  // 立即入队
 | `purge_playing` | `waveOutReset()`（录制前停止播放） |
 | 进程退出 | `Drop` → `waveOutReset` + `waveOutUnprepareHeader` × N + `waveOutClose` |
 
-**WAV 格式约束**：
-- 设备以 44100/16/mono 打开，加载时验证 wav 格式必须匹配（PCM, 1ch, 44100Hz, 16bit）。
-- 不匹配的文件视为缺失（log warn，触发时静默跳过）。
-- 我们自己的录制模块（hound）固定输出此格式，用户手动替换文件需符合规格。
+**WAV 格式处理**：
+- 设备格式从第一个有效 wav 文件动态推断（不硬编码 44100/16/mono），用该格式 `waveOutOpen`。
+- 两个文件必须格式一致（同一录制设备产出自然一致），不匹配的文件静默跳过。
+- 录制覆盖后若格式变化（如更换了麦克风），`reload_cache` 自动关闭旧设备、以新格式重新打开。
+- 仅要求 PCM 格式（`wFormatTag == 1`），非 PCM 文件拒绝加载。
 
 **预期收益**：触发延迟从 PlaySoundW 的 ~200-400ms 降至 waveOutReset + waveOutWrite + driver pipeline 的 ~5-15ms。
 
