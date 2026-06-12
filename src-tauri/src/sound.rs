@@ -35,8 +35,18 @@ mod inner {
     // SAFETY: WAVEHDR + HWAVEOUT are thread-safe when access is serialized by Mutex.
     unsafe impl Send for PreparedBuf {}
 
+    /// wav 文件解析结果
+    struct WavInfo {
+        pcm_offset: usize,
+        pcm_len: usize,
+        channels: u16,
+        sample_rate: u32,
+        bits_per_sample: u16,
+    }
+
     struct WaveDevice {
         handle: HWAVEOUT,
+        format: (u16, u32, u16), // (channels, sample_rate, bits)
         bufs: HashMap<&'static str, PreparedBuf>,
     }
 
@@ -72,16 +82,18 @@ mod inner {
         }
     }
 
-    /// 从 wav 字节中解析 PCM 数据起始偏移和长度,同时验证格式。
-    /// 返回 (data_offset, data_len) 或 None。
-    fn parse_wav(raw: &[u8]) -> Option<(usize, usize)> {
+    /// 从 wav 字节中解析格式信息和 PCM 数据位置。
+    fn parse_wav(raw: &[u8]) -> Option<WavInfo> {
         if raw.len() < 44 {
             return None;
         }
         if &raw[0..4] != b"RIFF" || &raw[8..12] != b"WAVE" {
             return None;
         }
-        // 扫描 "data" chunk（跳过可能的 LIST/INFO 等元数据 chunk）
+        let mut channels: u16 = 0;
+        let mut sample_rate: u32 = 0;
+        let mut bits_per_sample: u16 = 0;
+        let mut fmt_found = false;
         let mut pos = 12;
         while pos + 8 <= raw.len() {
             let chunk_id = &raw[pos..pos + 4];
@@ -93,40 +105,52 @@ mod inner {
             ]) as usize;
             if chunk_id == b"fmt " && chunk_size >= 16 {
                 let fmt_tag = u16::from_le_bytes([raw[pos + 8], raw[pos + 9]]);
-                let channels = u16::from_le_bytes([raw[pos + 10], raw[pos + 11]]);
-                let sample_rate =
-                    u32::from_le_bytes([raw[pos + 12], raw[pos + 13], raw[pos + 14], raw[pos + 15]]);
-                let bits = u16::from_le_bytes([raw[pos + 22], raw[pos + 23]]);
-                if fmt_tag != 1 || channels != 1 || sample_rate != 44100 || bits != 16 {
-                    log::warn!(
-                        "[sound] unsupported format: tag={} ch={} rate={} bits={}",
-                        fmt_tag,
-                        channels,
-                        sample_rate,
-                        bits
-                    );
+                if fmt_tag != 1 {
+                    log::warn!("[sound] not PCM format (tag={})", fmt_tag);
                     return None;
                 }
+                channels = u16::from_le_bytes([raw[pos + 10], raw[pos + 11]]);
+                sample_rate = u32::from_le_bytes([
+                    raw[pos + 12],
+                    raw[pos + 13],
+                    raw[pos + 14],
+                    raw[pos + 15],
+                ]);
+                bits_per_sample = u16::from_le_bytes([raw[pos + 22], raw[pos + 23]]);
+                fmt_found = true;
             }
             if chunk_id == b"data" {
-                let data_offset = pos + 8;
-                let data_len = chunk_size.min(raw.len() - data_offset);
-                return Some((data_offset, data_len));
+                if !fmt_found {
+                    return None;
+                }
+                let pcm_offset = pos + 8;
+                let pcm_len = chunk_size.min(raw.len() - pcm_offset);
+                return Some(WavInfo {
+                    pcm_offset,
+                    pcm_len,
+                    channels,
+                    sample_rate,
+                    bits_per_sample,
+                });
             }
-            // 下一个 chunk（对齐到偶数字节）
             pos += 8 + ((chunk_size + 1) & !1);
         }
         None
     }
 
-    fn open_device() -> Option<HWAVEOUT> {
+    fn open_device_with_format(
+        channels: u16,
+        sample_rate: u32,
+        bits_per_sample: u16,
+    ) -> Option<HWAVEOUT> {
+        let block_align = channels * bits_per_sample / 8;
         let fmt = WAVEFORMATEX {
             wFormatTag: WAVE_FORMAT_PCM as u16,
-            nChannels: 1,
-            nSamplesPerSec: 44100,
-            nAvgBytesPerSec: 44100 * 2,
-            nBlockAlign: 2,
-            wBitsPerSample: 16,
+            nChannels: channels,
+            nSamplesPerSec: sample_rate,
+            nAvgBytesPerSec: sample_rate * block_align as u32,
+            nBlockAlign: block_align,
+            wBitsPerSample: bits_per_sample,
             cbSize: 0,
         };
         let mut handle: HWAVEOUT = std::ptr::null_mut();
@@ -141,6 +165,12 @@ mod inner {
             )
         };
         if result == 0 {
+            log::info!(
+                "[sound] waveOut opened: {}ch {}Hz {}bit",
+                channels,
+                sample_rate,
+                bits_per_sample
+            );
             Some(handle)
         } else {
             log::error!("[sound] waveOutOpen failed: error {}", result);
@@ -186,30 +216,68 @@ mod inner {
 
     fn load_single(handle: HWAVEOUT, file_name: &'static str) -> Option<PreparedBuf> {
         let raw = read_wav_bytes(file_name)?;
-        let (offset, len) = parse_wav(&raw)?;
-        let pcm: Vec<u8> = raw[offset..offset + len].to_vec();
+        let info = parse_wav(&raw)?;
+        let pcm: Vec<u8> = raw[info.pcm_offset..info.pcm_offset + info.pcm_len].to_vec();
         let pcm_arc = Arc::new(pcm);
         prepare_buf(handle, pcm_arc)
     }
 
     /// 打开 waveOut 设备并加载两个提示音缓冲。
     pub fn init() {
-        let handle = match open_device() {
+        // 先解析所有可用文件，确定格式
+        let files: Vec<(&'static str, Vec<u8>, WavInfo)> = [FILE_START, FILE_STOP]
+            .iter()
+            .filter_map(|&name| {
+                let raw = read_wav_bytes(name)?;
+                let info = parse_wav(&raw)?;
+                Some((name, raw, info))
+            })
+            .collect();
+
+        if files.is_empty() {
+            log::warn!("[sound] no valid wav files found, audio disabled");
+            return;
+        }
+
+        // 用第一个文件的格式打开设备
+        let first = &files[0].2;
+        let handle = match open_device_with_format(
+            first.channels,
+            first.sample_rate,
+            first.bits_per_sample,
+        ) {
             Some(h) => h,
             None => return,
         };
-        log::info!("[sound] waveOut device opened");
 
+        let device_format = (first.channels, first.sample_rate, first.bits_per_sample);
         let mut bufs = HashMap::new();
-        for &name in &[FILE_START, FILE_STOP] {
-            if let Some(buf) = load_single(handle, name) {
-                bufs.insert(name, buf);
+
+        for (name, raw, info) in &files {
+            let file_format = (info.channels, info.sample_rate, info.bits_per_sample);
+            if file_format != device_format {
+                log::warn!(
+                    "[sound] {} format {:?} differs from device {:?}, skipping",
+                    name,
+                    file_format,
+                    device_format
+                );
+                continue;
+            }
+            let pcm: Vec<u8> = raw[info.pcm_offset..info.pcm_offset + info.pcm_len].to_vec();
+            let pcm_arc = Arc::new(pcm);
+            if let Some(buf) = prepare_buf(handle, pcm_arc) {
+                bufs.insert(*name, buf);
                 log::info!("[sound] prepared buffer for {}", name);
             }
         }
 
         let mut guard = device_mutex().lock().unwrap();
-        *guard = Some(WaveDevice { handle, bufs });
+        *guard = Some(WaveDevice {
+            handle,
+            format: device_format,
+            bufs,
+        });
     }
 
     pub fn play_file(file_name: &str) {
@@ -260,8 +328,49 @@ mod inner {
         if let Some(mut old) = dev.bufs.remove(file_name) {
             unprepare_buf(dev.handle, &mut old);
         }
-        // 加载新文件
-        if let Some(buf) = load_single(dev.handle, file_name) {
+        // 读取新文件
+        let raw = match read_wav_bytes(file_name) {
+            Some(r) => r,
+            None => return,
+        };
+        let info = match parse_wav(&raw) {
+            Some(i) => i,
+            None => return,
+        };
+        // 格式变化时需要重新打开设备
+        let file_format = (info.channels, info.sample_rate, info.bits_per_sample);
+        if file_format != dev.format {
+            log::info!(
+                "[sound] format changed {:?} -> {:?}, reopening device",
+                dev.format,
+                file_format
+            );
+            // 卸载所有旧缓冲
+            for (_, mut buf) in dev.bufs.drain() {
+                unprepare_buf(dev.handle, &mut buf);
+            }
+            unsafe { waveOutClose(dev.handle); }
+            match open_device_with_format(info.channels, info.sample_rate, info.bits_per_sample) {
+                Some(h) => {
+                    dev.handle = h;
+                    dev.format = file_format;
+                }
+                None => {
+                    // 设备打开失败，整个 sound 不可用
+                    *guard = None;
+                    return;
+                }
+            }
+            // 重新加载另一个文件（如果存在且格式匹配）
+            let other = if file_name == FILE_START { FILE_STOP } else { FILE_START };
+            if let Some(buf) = load_single(dev.handle, other) {
+                dev.bufs.insert(other, buf);
+            }
+        }
+        // 加载目标文件
+        let pcm: Vec<u8> = raw[info.pcm_offset..info.pcm_offset + info.pcm_len].to_vec();
+        let pcm_arc = Arc::new(pcm);
+        if let Some(buf) = prepare_buf(dev.handle, pcm_arc) {
             dev.bufs.insert(file_name, buf);
             log::info!("[sound] reloaded buffer for {}", file_name);
         }
