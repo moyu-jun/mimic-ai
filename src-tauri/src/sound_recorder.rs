@@ -300,8 +300,8 @@ pub fn save_trimmed_audio(
     end_ms: u32,
 ) -> Result<(), String> {
     let file_name = match target.as_str() {
-        "start" => "按键开启.wav",
-        "stop" => "按键关闭.wav",
+        "start" => crate::sound::FILE_START,
+        "stop" => crate::sound::FILE_STOP,
         _ => return Err("invalid target".to_string()),
     };
 
@@ -348,6 +348,9 @@ pub fn save_trimmed_audio(
 
     write_wav(&final_path, trimmed, sample_rate)?;
     info!("[recorder] trimmed audio saved to {}", final_path.display());
+
+    // 写盘成功后刷新内存常驻缓存 — DESIGN 18.4
+    crate::sound::reload_cache(file_name);
 
     // 清空缓冲
     if let Ok(s) = state.lock() {

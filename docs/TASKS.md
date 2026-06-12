@@ -584,6 +584,37 @@
 
 ---
 
+### 阶段 19：提示音延迟优化（内存常驻 + SND_MEMORY）
+
+**目标**：消除热键触发与试听按钮的可感知音频延迟，端到端 <10ms（REQUIREMENTS 3.13 新增条目）。
+
+**根因**：现有 `play_file` 走 `PlaySoundW(SND_FILENAME | SND_ASYNC)`，调用瞬间仍需同步完成 `current_exe()`、`path.exists()`、UTF-16 转换、打开 wav 文件、读取全部字节、解析 RIFF 头，造成 10–50ms 触发延迟（冷盘更糟）。
+
+**方案**：详见 DESIGN 18.4 — 启动期把两个 wav 读入内存常驻缓存（`OnceLock<RwLock<HashMap<&str, Arc<Vec<u8>>>>>`），触发路径直接从内存调 `PlaySoundW(SND_MEMORY | SND_ASYNC | SND_NODEFAULT)`；录制覆盖后调 `reload_cache(target)` 刷新。
+
+**任务**：
+
+1. **[src-tauri/src/sound.rs](../src-tauri/src/sound.rs)**：
+   - 新增 `SOUND_CACHE: OnceLock<RwLock<HashMap<&'static str, Arc<Vec<u8>>>>>`。
+   - 新增 `pub fn load_cache()`：把 `按键开启.wav` / `按键关闭.wav` 一次性读入缓存（缺失 key 留空）。
+   - 新增 `pub fn reload_cache(file_name: &'static str)`：从磁盘重读对应文件覆盖缓存。
+   - 改写 `play_file(file_name)`：从缓存取 `Arc<Vec<u8>>`，调 `PlaySoundW(buf, NULL, SND_MEMORY | SND_ASYNC | SND_NODEFAULT)`；cache miss 时 `log::warn!` 后直接返回（与现有"文件不存在"分支语义一致）。
+   - `warmup` / `start_keepalive` / `purge_playing` 不改。
+
+2. **[src-tauri/src/lib.rs](../src-tauri/src/lib.rs)** `setup`：在 `sound::warmup()` 之后追加 `sound::load_cache()`。
+
+3. **[src-tauri/src/sound_recorder.rs](../src-tauri/src/sound_recorder.rs)** `save_trimmed_audio`：`fs::rename` 成功后追加 `crate::sound::reload_cache("按键开启.wav" 或 "按键关闭.wav")`。
+
+**可运行验收**：
+
+- [ ] `cargo fmt` 无 diff、`cargo clippy -- -D warnings` 通过、`cargo check` 通过（静态验收）。
+- [ ] 实机：热键启动模拟时声音"按下即响"，无可感知延迟（⏳ 待实机）。
+- [ ] 实机：设置页点「试听」按钮"按下即响"，无可感知延迟（⏳ 待实机）。
+- [ ] 实机：录制并保存新提示音后，立即触发热键 / 试听播放的是新声音（缓存刷新生效）（⏳ 待实机）。
+- [ ] 实机：删除 `audio/按键开启.wav` 后启动，触发启动热键不报错（cache miss 静默跳过）（⏳ 待实机）。
+
+---
+
 ## 待确认事项跟踪
 
 | # | 事项 | 状态 | 触发动作 |
