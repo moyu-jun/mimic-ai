@@ -11,9 +11,14 @@ use std::sync::{Arc, Mutex};
 use crate::config::AppConfig;
 
 // 为 Interception 创建 Send + Sync 包装器
-// SAFETY: Interception 内部使用 Windows 内核对象指针，
-// 该指针仅在创建它的线程内使用是安全的。
-// 我们通过将其包装在 Arc<Mutex<>> 中，确保同一时刻只有一个线程访问它。
+// SAFETY: Interception 内部封装的是 Windows 内核 HANDLE（DeviceIoControl 句柄）。
+// Windows 内核对象在内核层面是线程安全的，可在线程间传递；但 interception crate 上层
+// 的 Rust 状态（如 buffer、filter 设置）不是内部同步的，因此调用方必须自行串行化访问。
+// 本项目所有 SendInterception 实例均通过 Arc<Mutex<Option<SendInterception>>> 持有，
+// 由 Mutex 保证同一时刻只有一个线程在调用其方法（wait/receive/send）。
+//
+// 维护提示：如未来要去掉外层 Mutex，必须先核实 interception crate 当前版本的
+// 内部状态是否已变为线程安全；否则会引入数据竞争 UB。
 pub struct SendInterception(pub interception::Interception);
 unsafe impl Send for SendInterception {}
 unsafe impl Sync for SendInterception {}
