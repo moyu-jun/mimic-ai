@@ -72,7 +72,7 @@
   - `target/debug/interception.dll` 存在（exe 同级）
   - `target/debug/driver/install-interception.exe` 存在
   - `target/debug/audio/{按键开启.wav, 按键关闭.wav}` 存在
-- 直接执行验证：`cd target/debug && ./mimic-ai.exe` 成功启动，日志显示完整启动流程无 DLL 加载错误。
+- 直接执行验证：`cd target/debug && ./mimic.exe` 成功启动，日志显示完整启动流程无 DLL 加载错误。
 
 ### 文档回写
 

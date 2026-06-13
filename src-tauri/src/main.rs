@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    mimic_ai_lib::run()
+    mimic_lib::run()
 }
