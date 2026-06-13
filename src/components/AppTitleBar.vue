@@ -8,6 +8,7 @@ import { computed } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { appStore } from '../stores/appStore'
 import { PAGE_LABELS } from '../lib/pages'
+import appIconUrl from '../../src-tauri/icons/128x128.png'
 
 const currentPageLabel = computed(() => PAGE_LABELS[appStore.currentPage])
 
@@ -25,16 +26,7 @@ function closeWindow(): void {
 <template>
   <header class="titlebar" data-tauri-drag-region>
     <span class="brand">
-      <svg class="app-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect width="24" height="24" rx="4" fill="url(#gradient)"/>
-        <path d="M8 10L12 14L16 10" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        <defs>
-          <linearGradient id="gradient" x1="0" y1="0" x2="24" y2="24">
-            <stop offset="0%" stop-color="#FE7733"/>
-            <stop offset="100%" stop-color="#B1FA63"/>
-          </linearGradient>
-        </defs>
-      </svg>
+      <img :src="appIconUrl" class="app-icon" alt="Mimic" draggable="false" />
       <span class="app-name">Mimic</span>
     </span>
     <span class="current-page">{{ currentPageLabel }}</span>
