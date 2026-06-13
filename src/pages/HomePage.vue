@@ -420,7 +420,7 @@ onMounted(async () => {
   padding: 3px 10px;
   border-radius: 6px;
   background: var(--warning);
-  color: var(--bg-primary);
+  color: var(--color-paper-white);
   font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
@@ -539,7 +539,7 @@ onMounted(async () => {
 /* 重启电脑按钮 — 警告色，提示这是系统级操作 */
 .install-btn.reboot-btn {
   background: var(--warning);
-  color: var(--bg-primary);
+  color: var(--color-paper-white);
 }
 
 .install-btn.reboot-btn:hover:not(:disabled) {
