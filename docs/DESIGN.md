@@ -666,6 +666,13 @@ pub fn install_interception_driver() -> Result<(), String> {
 }
 ```
 
+**调度细节（2026-06-14 加固，对应代码审查 Phase 2）**：
+
+- **退出码校验**：`WaitForSingleObject` 等待安装器退出后，必须调 `GetExitCodeProcess` 取退出码；非 0 时返回 Err，**不能让前端拿到 Ok 走"已安装待重启"分支**，否则用户会被误导去做无效重启。`GetExitCodeProcess` 必须在 `CloseHandle` 之前调用——句柄关了就读不到退出码。
+- **路径编码**：installer 路径走 `OsStrExt::encode_wide` 直接展开 PathBuf，不经 `to_string_lossy` 中转。后者遇到不能映射到 UTF-8 的 WTF-16 序列（孤立代理对、某些 emoji）会替换为 U+FFFD（�），导致 ShellExecuteExW 找不到文件。
+- **错误码诊断**：`ShellExecuteExW` 失败时调 `GetLastError`，把错误码加进 err_msg。1223 = 用户拒绝 UAC、2 = 文件不存在、5 = 权限拒绝，能区分场景，便于运维诊断。
+- **`SW_HIDE + INFINITE` 隐性约束**：当前实现假设 installer 是非交互控制台程序、始终能快速退出。该假设由 `oblitum/Interception` 当前版本满足。**若未来更换为带 GUI 对话框的 installer，必须同步改为 `SW_SHOWNORMAL` 或加有限超时，否则用户看不见对话框、Tauri 命令线程会永久阻塞。**
+
 ### 12.3.1 驱动卸载（与安装对称）
 
 入口命令 `uninstall_interception_driver`，结构与 `install_interception_driver` 完全对称：

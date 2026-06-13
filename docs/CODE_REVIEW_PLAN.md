@@ -9,7 +9,7 @@
 | 阶段 | 名称 | 状态 | 完成时间 | 严重问题数 | 备注 |
 |------|------|------|----------|------------|------|
 | 1 | 状态与数据层基础 | ✅ 已完成（已修复） | 2026-06-14 | C0 / M2→已修 / m7 | 已修：M1, M2, m2, m6；详见 Phase 1 结果 |
-| 2 | 权限与驱动管理 | ⬜ 未开始 | — | — | — |
+| 2 | 权限与驱动管理 | ✅ 已完成（已修复） | 2026-06-14 | C0 / M2→已修 / m8 | 已修：M1, M2, m1, m3, m7；详见 Phase 2 结果 |
 | 3 | 热键监听与 Interception listener | ⬜ 未开始 | — | — | — |
 | 4 | 模拟 Worker 与坐标拾取 | ⬜ 未开始 | — | — | — |
 | 5 | 音频（播放 + 录制） | ⬜ 未开始 | — | — | — |
@@ -82,6 +82,24 @@
   - 现状：`state.rs:70` 用 `String` 持有当前页面，DESIGN 4.1 已定义 `AppPage = 'home' | 'keyboard' | 'mouse' | 'settings'`，但后端无对应 Rust enum。
   - 影响：失去编译期保证，命令边界传错字符串会静默不生效。
   - 修改范围：`state.rs` + `lib.rs::set_current_page` + 所有读取点（`hotkeys_interception` 检查可触发页面）。
+
+- **OPT-2 — `shutdown` 命令用绝对路径**
+  - 来源：Phase 2 m4。
+  - 现状：`driver.rs:188` 用 `Command::new("shutdown")` 走 PATH 解析。
+  - 影响：PATH 污染场景下可能执行到伪造 shutdown.exe。实际威胁低（攻击者已具备任意 RCE 能力），但属于纵深防御缺位。
+  - 修改范围：`driver.rs::reboot_system_windows`，用 `GetSystemDirectoryW` 拼绝对路径。
+
+- **OPT-3 — `check_driver_windows` 要求 keyboard + mouse 两个服务都存在**
+  - 来源：Phase 2 m5。
+  - 现状：任一服务键存在即报告 `InstalledNeedReboot`。
+  - 影响：极少数中断安装场景（注册表非原子）会误报"已安装"。
+  - 修改范围：`driver.rs::check_driver_windows` 把 for 循环改为"全部存在"判断。
+
+- **OPT-4 — `SHELLEXECUTEINFOW.lpDirectory` 设为 exe_dir**
+  - 来源：Phase 2 m6。
+  - 现状：lpDirectory 留 null，installer 继承调用进程 CWD。
+  - 影响：当前 installer 不读相对路径资源，无功能影响；未来换 installer 可能踩坑。
+  - 修改范围：`driver.rs::run_installer_windows` 加一行 `sei.lpDirectory = dir_wide.as_ptr()`。
 
 ---
 
@@ -175,20 +193,86 @@
 
 ## Phase 2 — 权限与驱动管理
 
-**状态**：⬜ 未开始
+**状态**：✅ 已完成（2026-06-14）
 
 **文件**：
 - `src-tauri/src/admin.rs` (106 行)
 - `src-tauri/src/driver.rs` (210 行)
 
 **审查重点**：
-- [ ] `is_admin()` 在 `OpenProcessToken` / `GetTokenInformation` 失败时是否安全降级为"非管理员"（绝不能误判为管理员，否则越过守卫）。
-- [ ] `restart_as_admin()` / `reboot_system` 的 `ShellExecuteW` 参数转义、宽字符串 NUL 终止、用户取消 UAC 的返回值处理。
-- [ ] 安装/卸载 `run_installer_windows`：拼接 exe 路径时对路径含空格、Unicode 是否安全；`/install` `/uninstall` 参数传递有无注入空间。
-- [ ] `check_driver_status` 顺序：先 `Interception::new()` 再查注册表（DESIGN 8.3 修复点）；`Interception::new()` 在驱动卸载未重启时是否可能仍成功 → 这关系到首页"卸载已生效"判断不可信任后端检测。
-- [ ] 安装器路径校验：`exists()` 检查后到 `ShellExecuteExW` 之间的 TOCTOU；exe_dir 解析失败时的兜底。
+- [x] `is_admin()` 在 `OpenProcessToken` / `GetTokenInformation` 失败时是否安全降级为"非管理员"（绝不能误判为管理员，否则越过守卫）。
+- [x] `restart_as_admin()` / `reboot_system` 的 `ShellExecuteW` 参数转义、宽字符串 NUL 终止、用户取消 UAC 的返回值处理。
+- [x] 安装/卸载 `run_installer_windows`：拼接 exe 路径时对路径含空格、Unicode 是否安全；`/install` `/uninstall` 参数传递有无注入空间。
+- [x] `check_driver_status` 顺序：先 `Interception::new()` 再查注册表（DESIGN 8.3 修复点）；`Interception::new()` 在驱动卸载未重启时是否可能仍成功 → 这关系到首页"卸载已生效"判断不可信任后端检测。
+- [x] 安装器路径校验：`exists()` 检查后到 `ShellExecuteExW` 之间的 TOCTOU；exe_dir 解析失败时的兜底。
 
-**审查结果**：（待执行）
+### 审查结果
+
+#### 严重（Critical）
+- 无。
+
+#### 重要（Major）— 与文档不符 / 隐性逻辑错误
+
+- **M1 — 安装器退出码不校验，install/uninstall 失败被误报为成功** ✅ **已修复**
+  - **位置**：`driver.rs:166-176` `run_installer_windows`。
+  - **问题**：`WaitForSingleObject` 等到安装器进程退出后，代码仅判断 `WAIT_OBJECT_0`（即"进程已退出"），**未调用 `GetExitCodeProcess` 取退出码**。安装器若因写注册表失败、文件占用等原因退出码 != 0，前端仍收到 `Ok(())` → 继续走"驱动已安装，需重启电脑"分支 → 用户重启后才发现没装上。
+  - **修复**：等待返回 `WAIT_OBJECT_0` 后立即调 `GetExitCodeProcess`（必须在 `CloseHandle` 之前），仅 `exit_code == 0` 时返回 Ok，否则返回 Err 含退出码；同时 `WAIT_OBJECT_0` 之外的 wait 状态也直接返回 Err。
+
+- **M2 — REQUIREMENTS 3.12 偏差：管理员权限检测结果未记 info 日志** ✅ **已修复**
+  - **位置**：`admin.rs:32-58` `is_admin()`。
+  - **问题**：REQUIREMENTS 3.12 明确要求"管理员权限检测结果（elevated / limited）"作为日志覆盖项。当前实现只在 API 调用失败时 `log::warn!`，**正常路径**无任何日志，运维/支持人员排查问题时拿不到 elevated/limited 信息。
+  - **修复**：成功路径末尾加 `log::info!("[admin] elevation check: elevated/limited", ...)`。
+
+#### 次要（Minor）— 代码异味、健壮性改进点
+
+- **m1 — `installer_path.to_string_lossy()` 对非 BMP Unicode 路径不健壮** ✅ **已修复**
+  - 位置：`driver.rs:135` `let file = encode_wide(&installer_path.to_string_lossy());`。
+  - 修复：改用 `OsStrExt::encode_wide()` 直接在 PathBuf 上展开，绕开 String 中转，保留 WTF-16 原始序列。
+
+- **m2 — `WaitForSingleObject(INFINITE)` + `SW_HIDE` 风险** ⚠️ **不修，已落档**
+  - 决策：保持现状。当前 installer 是 oblitum/Interception 上游稳定多年的非交互控制台程序，行为可预期。
+  - 已在 DESIGN 12.3 加注释明确"SW_HIDE + INFINITE 假设 installer 是非交互控制台程序"，并指出更换 installer 时必须同步改为 SW_SHOWNORMAL 或加有限超时。
+
+- **m3 — `ShellExecuteExW` 失败不取 `GetLastError`** ✅ **已修复**
+  - 修复：失败分支调 `GetLastError()`，把错误码（1223 = 用户拒绝 UAC、2 = 文件不存在、5 = 权限拒绝等）加进 err_msg。
+
+- **m4 — `Command::new("shutdown")` 通过 PATH 解析** ⏭ 列入后续优化
+  - 决策：威胁低（能改 PATH 的攻击者已具备任意代码执行能力），列入"全审查后功能优化项 OPT-2"。
+
+- **m5 — `check_driver_windows` 不区分 keyboard / mouse 服务都存在** ⏭ 列入后续优化
+  - 决策：installer 注册表写入是顺序执行，崩溃中断窗口期极短，列入"全审查后功能优化项 OPT-3"。
+
+- **m6 — `lpDirectory` 未设置** ⏭ 列入后续优化
+  - 决策：当前 installer 不依赖相对路径资源加载，列入"全审查后功能优化项 OPT-4"。
+
+- **m7 — `reboot_system` 内部不做 `is_admin()` 防御检查** ✅ **已修复**
+  - 修复：函数顶部加 `if !crate::admin::is_admin() { return Err("permission_denied"); }`，防止外层守卫被回归改坏后悄悄退化。注释更新为"防御 + 命令入口已校验"双层。
+
+- **m8 — `CloseHandle` 返回值未检查** ❌ 不修
+  - 决策：调用频率极低、累计影响可忽略；CloseHandle 失败本身极罕见，且失败后无恢复手段，仅能 log。
+
+#### 与 REQUIREMENTS / DESIGN 偏差
+
+- **B1 — REQUIREMENTS 3.12 日志覆盖**：M2 已修 ✓。
+- **B2 — DESIGN 8.3 修复点 #1（Ready 检测先 `create_context()` 再查注册表）**：✓ 合规。
+- **B3 — DESIGN 12.3.1 install/uninstall 对称**：✓ 合规。本轮在 DESIGN 12.3 补充了"调度细节（2026-06-14 加固）"段落记录退出码校验、路径编码、GetLastError、SW_HIDE+INFINITE 约束。
+- **B4 — DESIGN 14.1 启动期不主动 UAC**：admin.rs 仅暴露 `is_admin` / `restart_as_admin`，启动期是否触发 UAC 由 `lib.rs` 决定（Phase 6 验证），admin.rs 本身合规。
+- **B5 — REQUIREMENTS 3.11 卸载后状态不依赖 `check_driver_status`**：✓ 合规（已知限制，文档化）。
+
+#### 待确认问题（已全部决议）
+
+- ~~Q1（M1 退出码校验）~~ → 决议：本轮修，加 GetExitCodeProcess。已修。
+- ~~Q2（M2 admin 日志）~~ → 决议：在 is_admin() 内部加 info 日志（成功路径）。已修。
+- ~~Q3（m1 路径编码）~~ → 决议：改用 OsStrExt::encode_wide。已修。
+- ~~Q4（m2 INFINITE 超时）~~ → 决议：不修，DESIGN 12.3 加注释说明假设。
+- ~~Q5（m3-m8 逐项）~~ → 决议：m3、m7 修；m4、m5、m6 列入后续优化；m8 不修。
+
+#### 修复验证
+
+- `cargo check`：通过（无 error）。
+- `cargo clippy -- -D warnings`：通过（无 warning）。
+- `rustfmt --check src/admin.rs src/driver.rs`：通过。
+- 修改文件：`src-tauri/src/admin.rs`、`src-tauri/src/driver.rs`、`docs/DESIGN.md`（12.3 调度细节注释）。
 
 ---
 

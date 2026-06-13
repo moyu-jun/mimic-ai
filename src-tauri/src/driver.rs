@@ -61,8 +61,13 @@ pub fn uninstall_driver() -> Result<(), String> {
 
 /// 触发系统重启 — 驱动安装后需重启才会加载
 ///
-/// 通过 `shutdown /r /t 0` 立即重启。需管理员权限（调用方已校验）。
+/// 通过 `shutdown /r /t 0` 立即重启。需管理员权限——
+/// 函数顶部加 `is_admin()` 防御检查，避免外层守卫被回归改坏后悄悄退化。
 pub fn reboot_system() -> Result<(), String> {
+    if !crate::admin::is_admin() {
+        log::warn!("[driver] reboot_system called without admin privileges, refused");
+        return Err("permission_denied".to_string());
+    }
     #[cfg(windows)]
     {
         reboot_system_windows()
@@ -109,8 +114,11 @@ fn check_driver_windows() -> DriverStatus {
 
 #[cfg(windows)]
 fn run_installer_windows(action_param: &str) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, WaitForSingleObject, INFINITE,
+    };
     use windows_sys::Win32::UI::Shell::{
         ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
     };
@@ -131,14 +139,25 @@ fn run_installer_windows(action_param: &str) -> Result<(), String> {
         ));
     }
 
+    // 路径直接走 OsStrExt::encode_wide，避免经 String 中转。
+    // to_string_lossy 会把不能映射到 UTF-8 的 WTF-16 序列（如孤立代理对、某些 emoji）
+    // 替换为 U+FFFD（�），导致 ShellExecuteExW 找不到文件。
     let verb = encode_wide("runas");
-    let file = encode_wide(&installer_path.to_string_lossy());
+    let file: Vec<u16> = installer_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let params = encode_wide(action_param);
 
     // 用 ShellExecuteExW 而非 ShellExecuteW：
     // 后者是「启动即返回」，安装器还没写完注册表我们就检测 → 状态误判。
     // SEE_MASK_NOCLOSEPROCESS 让 hProcess 填入安装器进程句柄，
     // 配合 WaitForSingleObject 等其真正退出后再返回，确保后续检测拿到正确状态。
+    //
+    // 隐性约束（DESIGN 12.3）：SW_HIDE + INFINITE 假设 installer 是非交互控制台程序、
+    // 始终能快速退出。当前 oblitum/Interception installer 满足此假设；若未来更换为
+    // 带 GUI 对话框的 installer，需改为 SW_SHOWNORMAL 或加有限超时。
     let mut sei: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -149,8 +168,12 @@ fn run_installer_windows(action_param: &str) -> Result<(), String> {
 
     let ok = unsafe { ShellExecuteExW(&mut sei) };
     if ok == 0 {
-        // 调度失败（用户拒绝 UAC 时 GetLastError == ERROR_CANCELLED 1223）
-        let err_msg = "ShellExecuteExW failed (user may have declined UAC)".to_string();
+        // 取真实错误码区分场景：1223=用户拒绝 UAC、2=文件不存在、5=权限拒绝等。
+        let err_code = unsafe { GetLastError() };
+        let err_msg = format!(
+            "ShellExecuteExW failed (GetLastError={}; 1223 = user declined UAC)",
+            err_code
+        );
         log::error!("[driver] {} (param={})", err_msg, action_param);
         return Err(err_msg);
     }
@@ -164,16 +187,40 @@ fn run_installer_windows(action_param: &str) -> Result<(), String> {
     // 阻塞等待安装器进程退出（INFINITE）。该命令在独立线程中执行，
     // 不会卡住 Tauri 主线程；前端通过 isInstalling/isUninstalling 显示进度。
     let wait = unsafe { WaitForSingleObject(sei.hProcess, INFINITE) };
-    unsafe { CloseHandle(sei.hProcess) };
 
-    if wait == WAIT_OBJECT_0 {
-        log::info!("[driver] installer process exited (param={})", action_param);
-        Ok(())
-    } else {
+    if wait != WAIT_OBJECT_0 {
+        unsafe { CloseHandle(sei.hProcess) };
         let err_msg = format!("WaitForSingleObject returned unexpected code {}", wait);
         log::error!("[driver] {}", err_msg);
-        Err(err_msg)
+        return Err(err_msg);
     }
+
+    // 进程已退出，取退出码确认安装器是否真的成功。
+    // GetExitCodeProcess 必须在 CloseHandle 之前调用——句柄关了就读不到了。
+    let mut exit_code: u32 = 0;
+    let exit_ok = unsafe { GetExitCodeProcess(sei.hProcess, &mut exit_code) };
+    unsafe { CloseHandle(sei.hProcess) };
+
+    if exit_ok == 0 {
+        let err_code = unsafe { GetLastError() };
+        let err_msg = format!("GetExitCodeProcess failed (GetLastError={})", err_code);
+        log::error!("[driver] {}", err_msg);
+        return Err(err_msg);
+    }
+
+    if exit_code != 0 {
+        // 安装器以非零退出码结束 = 实际安装/卸载失败。
+        // 不能让前端拿到 Ok 走「已安装待重启」分支，否则用户被引导去做无效重启。
+        let err_msg = format!("installer exited with code {}", exit_code);
+        log::error!("[driver] {} (param={})", err_msg, action_param);
+        return Err(err_msg);
+    }
+
+    log::info!(
+        "[driver] installer process exited successfully (param={})",
+        action_param
+    );
+    Ok(())
 }
 
 /// 触发系统重启 — Windows 实现，调用 `shutdown /r /t 0`

@@ -53,7 +53,12 @@ mod windows_impl {
                 log::warn!("[admin] GetTokenInformation failed; treating as non-admin");
                 return false;
             }
-            elevation.TokenIsElevated != 0
+            let elevated = elevation.TokenIsElevated != 0;
+            log::info!(
+                "[admin] elevation check: {}",
+                if elevated { "elevated" } else { "limited" }
+            );
+            elevated
         }
     }
 
